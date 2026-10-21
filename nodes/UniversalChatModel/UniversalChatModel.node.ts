@@ -12,6 +12,7 @@ import {
 } from 'n8n-workflow';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, parse } from 'node:path';
+import { ChatAnthropic } from '@langchain/anthropic';
 import { ChatOpenAI } from '@langchain/openai';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import {
@@ -899,12 +900,12 @@ export class UniversalChatModel implements INodeType {
     icon: 'file:universalChatModel.svg',
     group: ['transform'],
     version: 1,
-    description: 'Universal AI Chat Model supporting Google Gemini (Native) and OpenAI Compatible / Local LLMs (Ollama, LM Studio, DeepSeek, OpenRouter, vLLM)',
+    description: 'Universal AI Chat Model supporting Google Gemini (Native), Anthropic Claude, and OpenAI Compatible / Local LLMs (Ollama, LM Studio, DeepSeek, OpenRouter, vLLM)',
     defaults: {
       name: 'Universal Chat Model',
     },
     inputs:
-      '={{ (($parameter.provider === "gemini" && $parameter.geminiOptions && (($parameter.geminiOptions.usageReporter && $parameter.geminiOptions.usageReporter.settings && $parameter.geminiOptions.usageReporter.settings.enabled) || $parameter.geminiOptions.enableUsageReporter)) || ($parameter.provider === "openai_compatible" && $parameter.openaiOptions && (($parameter.openaiOptions.usageReporter && $parameter.openaiOptions.usageReporter.settings && $parameter.openaiOptions.usageReporter.settings.enabled) || $parameter.openaiOptions.enableUsageReporter)) || $parameter.enableUsageReporter) ? [{ type: "ai_tool", displayName: "Usage Reporter", required: false, maxConnections: 1 }] : [] }}',
+      '={{ (($parameter.provider === "gemini" && $parameter.geminiOptions && (($parameter.geminiOptions.usageReporter && $parameter.geminiOptions.usageReporter.settings && $parameter.geminiOptions.usageReporter.settings.enabled) || $parameter.geminiOptions.enableUsageReporter)) || ($parameter.provider === "anthropic" && $parameter.anthropicOptions && (($parameter.anthropicOptions.usageReporter && $parameter.anthropicOptions.usageReporter.settings && $parameter.anthropicOptions.usageReporter.settings.enabled) || $parameter.anthropicOptions.enableUsageReporter)) || ($parameter.provider === "openai_compatible" && $parameter.openaiOptions && (($parameter.openaiOptions.usageReporter && $parameter.openaiOptions.usageReporter.settings && $parameter.openaiOptions.usageReporter.settings.enabled) || $parameter.openaiOptions.enableUsageReporter)) || $parameter.enableUsageReporter) ? [{ type: "ai_tool", displayName: "Usage Reporter", required: false, maxConnections: 1 }] : [] }}',
     outputs: [NodeConnectionTypes.AiLanguageModel],
     credentials: [
       {
@@ -913,6 +914,15 @@ export class UniversalChatModel implements INodeType {
         displayOptions: {
           show: {
             provider: ['gemini'],
+          },
+        },
+      },
+      {
+        name: 'anthropicApi',
+        required: true,
+        displayOptions: {
+          show: {
+            provider: ['anthropic'],
           },
         },
       },
@@ -1041,6 +1051,11 @@ export class UniversalChatModel implements INodeType {
             name: 'Google Gemini (Native)',
             value: 'gemini',
             description: 'Native Google Gemini API with advanced thinking, safety, and output schema controls',
+          },
+          {
+            name: 'Anthropic (Claude)',
+            value: 'anthropic',
+            description: 'Native Anthropic Claude API (Sonnet 5.5, Haiku 5.5, Opus 5.5, Fable 5.1 with Adaptive / Extended Thinking)',
           },
           {
             name: 'OpenAI Compatible / Local LLM / DeepSeek',
@@ -1252,7 +1267,99 @@ export class UniversalChatModel implements INodeType {
         ],
       },
 
-      // ─── 3. OPENAI / LOCAL LLM — Required Fields ───
+      // ─── 3. ANTHROPIC (CLAUDE) — Required Fields ───
+      {
+        displayName: 'Model Name',
+        name: 'anthropicModel',
+        type: 'options',
+        displayOptions: { show: { provider: ['anthropic'] } },
+        typeOptions: { loadOptionsMethod: 'getAnthropicModels' },
+        default: 'claude-sonnet-5-5',
+        description: 'Select dynamically loaded Claude model or specify custom ID below',
+      },
+      {
+        displayName: 'Custom Model ID',
+        name: 'anthropicModelCustom',
+        type: 'string',
+        displayOptions: { show: { provider: ['anthropic'] } },
+        default: '',
+        placeholder: 'e.g., claude-sonnet-5-5, claude-opus-5-5',
+        description: 'Optional custom Claude model ID (overrides dropdown selection if set)',
+      },
+
+      // ─── 3a. ANTHROPIC (CLAUDE) — Options (Optional) ───
+      {
+        displayName: 'Options',
+        name: 'anthropicOptions',
+        type: 'collection',
+        placeholder: 'Add Option',
+        default: {},
+        displayOptions: { show: { provider: ['anthropic'] } },
+        options: [
+          {
+            displayName: 'Temperature',
+            name: 'temperature',
+            type: 'number',
+            typeOptions: { minValue: 0.0, maxValue: 1.0, numberPrecision: 2 },
+            default: 1.0,
+            description: 'Controls randomness (0.0 to 1.0). Must be 1.0 when Extended / Adaptive Thinking is enabled.',
+          },
+          {
+            displayName: 'Max Output Tokens',
+            name: 'maxTokens',
+            type: 'number',
+            default: 8192,
+            typeOptions: { minValue: 1, maxValue: 128000 },
+            description: 'Maximum number of tokens to generate. Must be strictly greater than Thinking Budget when Thinking is enabled.',
+          },
+          {
+            displayName: 'Top P',
+            name: 'topP',
+            type: 'number',
+            typeOptions: { minValue: 0.0, maxValue: 1.0, numberPrecision: 2 },
+            default: 0.999,
+            description: 'Nucleus sampling threshold parameter (0.0 to 1.0)',
+          },
+          {
+            displayName: 'Top K',
+            name: 'topK',
+            type: 'number',
+            default: 40,
+            description: 'Only sample from the top K options for each subsequent token',
+          },
+          {
+            displayName: 'Extended / Adaptive Thinking',
+            name: 'thinking',
+            type: 'boolean',
+            default: false,
+            description: 'Enable reasoning mode for Claude models with a dedicated token budget',
+          },
+          {
+            displayName: 'Thinking Budget (Tokens)',
+            name: 'thinkingBudget',
+            type: 'number',
+            typeOptions: { minValue: 1024, numberPrecision: 0 },
+            default: 2048,
+            displayOptions: {
+              show: {
+                thinking: [true],
+              },
+            },
+            description: 'Token budget for thinking (minimum 1024). Max Output Tokens must be greater than this budget.',
+          },
+          {
+            displayName: 'Base URL Override',
+            name: 'baseUrl',
+            type: 'string',
+            default: '',
+            placeholder: 'https://api.anthropic.com',
+            description: 'Override API base URL for proxies or custom enterprise gateways',
+          },
+          ...sharedModelOptions(),
+        ],
+      },
+
+      // ─── 4. OPENAI / LOCAL LLM — Required Fields ───
       {
         displayName: 'Model Name / ID',
         name: 'openaiModel',
@@ -1395,6 +1502,54 @@ export class UniversalChatModel implements INodeType {
               }
             }
             if (options.length > 0) return options;
+          }
+        } catch { /* fallback */ }
+
+        return defaultModels;
+      },
+
+      async getAnthropicModels(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
+        let apiKey = '';
+        let baseUrl = 'https://api.anthropic.com';
+        try {
+          const creds = await this.getCredentials('anthropicApi');
+          if (creds && typeof creds.apiKey === 'string') apiKey = creds.apiKey.trim();
+          if (creds && typeof creds.baseUrl === 'string' && creds.baseUrl.trim()) {
+            baseUrl = creds.baseUrl.trim();
+          }
+        } catch { /* ignore */ }
+
+        baseUrl = baseUrl.replace(/\/+$/, '');
+
+        const defaultModels: INodePropertyOptions[] = [
+          { name: 'Claude Sonnet 5.5', value: 'claude-sonnet-5-5' },
+          { name: 'Claude Haiku 5.5', value: 'claude-haiku-5-5' },
+          { name: 'Claude Opus 5.5', value: 'claude-opus-5-5' },
+          { name: 'Claude Fable 5.1', value: 'claude-fable-5-1' },
+          { name: 'Claude 3.7 Sonnet (Legacy)', value: 'claude-3-7-sonnet-20250219' },
+          { name: 'Claude 3.5 Sonnet (Legacy)', value: 'claude-3-5-sonnet-20241022' },
+        ];
+
+        if (!apiKey) return defaultModels;
+
+        try {
+          const modelsUrl = baseUrl.endsWith('/v1') ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
+          const response: any = await this.helpers.httpRequest({
+            method: 'GET',
+            url: modelsUrl,
+            headers: {
+              'x-api-key': apiKey,
+              'anthropic-version': '2023-06-01',
+            },
+            json: true,
+          });
+
+          if (response && Array.isArray(response.data) && response.data.length > 0) {
+            return response.data.map((m: any) => {
+              const modelId = String(m.id || m.name || m);
+              const label = m.display_name ? `${m.display_name} (${modelId})` : modelId;
+              return { name: label, value: modelId };
+            });
           }
         } catch { /* fallback */ }
 
@@ -1624,6 +1779,111 @@ export class UniversalChatModel implements INodeType {
 
       return {
         response: applyModelRetry(model, executionSettings, 'gemini'),
+      };
+
+    } else if (provider === 'anthropic') {
+      // ─── Anthropic (Claude) ───
+      const creds = await this.getCredentials('anthropicApi');
+      const anthropicApiKey =
+        creds && typeof creds.apiKey === 'string' ? creds.apiKey.trim() : '';
+      if (!anthropicApiKey) {
+        throw new Error('Anthropic API Key is required. Configure the Anthropic API credential.');
+      }
+      let credBaseUrl =
+        creds && typeof creds.baseUrl === 'string' ? creds.baseUrl.trim() : '';
+
+      // Resolve model
+      let anthropicModel = this.getNodeParameter('anthropicModel', executionItemIndex, 'claude-sonnet-5-5') as string;
+      const customModel = this.getNodeParameter('anthropicModelCustom', executionItemIndex, '') as string;
+      if (customModel.trim()) anthropicModel = customModel.trim();
+
+      // Options (all optional)
+      const opts = this.getNodeParameter('anthropicOptions', executionItemIndex, {}) as UsageReportingOptions & {
+        temperature?: number;
+        maxTokens?: number;
+        topP?: number;
+        topK?: number;
+        thinking?: boolean;
+        thinkingBudget?: number;
+        baseUrl?: string;
+      };
+      const sharedOptions = resolveSharedModelOptions(this, opts);
+
+      const maxTokens = opts.maxTokens ?? 8192;
+
+      let thinking: { type: 'enabled'; budget_tokens: number } | undefined;
+      if (opts.thinking === true) {
+        const budget = opts.thinkingBudget ?? 2048;
+        if (budget < 1024) {
+          throw new Error('Thinking Budget must be at least 1024 tokens.');
+        }
+        if (maxTokens <= budget) {
+          throw new Error(`Max Output Tokens (${maxTokens}) must be greater than Thinking Budget (${budget}).`);
+        }
+        thinking = {
+          type: 'enabled',
+          budget_tokens: budget,
+        };
+        if (opts.temperature !== undefined && opts.temperature !== 1.0) {
+          throw new Error('When Extended / Adaptive Thinking is enabled, Anthropic requires Temperature to be 1.0.');
+        }
+      }
+
+      let finalBaseUrl = (opts.baseUrl && opts.baseUrl.trim()) || credBaseUrl || undefined;
+      if (finalBaseUrl) finalBaseUrl = finalBaseUrl.replace(/\/+$/, '');
+
+      const modelOptions: any = {
+        apiKey: anthropicApiKey,
+        modelName: anthropicModel,
+        model: anthropicModel,
+        maxTokens,
+        callbacks: [],
+        maxRetries: 0,
+      };
+      if (finalBaseUrl) {
+        modelOptions.anthropicApiUrl = finalBaseUrl;
+        modelOptions.clientOptions = { baseURL: finalBaseUrl };
+      }
+      if (opts.temperature !== undefined) {
+        modelOptions.temperature = opts.temperature;
+      }
+      if (opts.topP !== undefined) {
+        modelOptions.topP = opts.topP;
+      }
+      if (opts.topK !== undefined) {
+        modelOptions.topK = opts.topK;
+      }
+      if (thinking) {
+        modelOptions.thinking = thinking;
+      }
+
+      const usageReporter = await createUsageReporter(
+        this,
+        executionItemIndex,
+        anthropicModel,
+        sharedOptions,
+      );
+      modelOptions.callbacks = [
+        new UniversalChatModelTracing(
+          this,
+          'anthropic',
+          opts.thinking === true,
+          sharedOptions.includeTokenUsageInAgentOutput === true,
+          sharedOptions.includeIntermediateStepsInOutput === true,
+          usageReporter,
+          sharedOptions.failOnReporterError === true,
+        ),
+      ];
+
+      let model: BaseChatModel = new ChatAnthropic(modelOptions);
+      model = applySystemMessage(model, sharedOptions.systemMessage ?? '');
+
+      return {
+        response: applyModelRetry(
+          model,
+          executionSettings,
+          'anthropic',
+        ),
       };
 
     } else {

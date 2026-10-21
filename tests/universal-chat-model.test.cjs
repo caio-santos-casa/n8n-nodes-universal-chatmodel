@@ -106,6 +106,7 @@ test('package targets the runtime dependency set used by n8n 2.32.6', () => {
     'npm:@langchain/core@1.2.0',
   );
   assert.equal(packageJson.dependencies['@langchain/core'], '1.2.4');
+  assert.equal(packageJson.dependencies['@langchain/anthropic'], '1.5.3');
   assert.equal(packageJson.dependencies['@google/generative-ai'], '0.24.0');
   assert.equal(packageJson.dependencies['@langchain/google-genai'], '2.1.24');
   assert.equal(packageJson.dependencies['@langchain/openai'], '1.5.5');
@@ -169,6 +170,7 @@ test('Gemini generation controls are optional collection entries', () => {
     description.credentials.map((credential) => [credential.name, credential]),
   );
   assert.equal(credentials.googleGeminiApi.required, true);
+  assert.equal(credentials.anthropicApi.required, true);
   assert.equal(credentials.openAiCompatibleApi.required, false);
 });
 
@@ -176,11 +178,14 @@ test('Usage Reporter is an optional AI Tool input with configurable privacy cont
   const description = new UniversalChatModel().description;
   assert.equal(
     description.inputs,
-    '={{ (($parameter.provider === "gemini" && $parameter.geminiOptions && (($parameter.geminiOptions.usageReporter && $parameter.geminiOptions.usageReporter.settings && $parameter.geminiOptions.usageReporter.settings.enabled) || $parameter.geminiOptions.enableUsageReporter)) || ($parameter.provider === "openai_compatible" && $parameter.openaiOptions && (($parameter.openaiOptions.usageReporter && $parameter.openaiOptions.usageReporter.settings && $parameter.openaiOptions.usageReporter.settings.enabled) || $parameter.openaiOptions.enableUsageReporter)) || $parameter.enableUsageReporter) ? [{ type: "ai_tool", displayName: "Usage Reporter", required: false, maxConnections: 1 }] : [] }}',
+    '={{ (($parameter.provider === "gemini" && $parameter.geminiOptions && (($parameter.geminiOptions.usageReporter && $parameter.geminiOptions.usageReporter.settings && $parameter.geminiOptions.usageReporter.settings.enabled) || $parameter.geminiOptions.enableUsageReporter)) || ($parameter.provider === "anthropic" && $parameter.anthropicOptions && (($parameter.anthropicOptions.usageReporter && $parameter.anthropicOptions.usageReporter.settings && $parameter.anthropicOptions.usageReporter.settings.enabled) || $parameter.anthropicOptions.enableUsageReporter)) || ($parameter.provider === "openai_compatible" && $parameter.openaiOptions && (($parameter.openaiOptions.usageReporter && $parameter.openaiOptions.usageReporter.settings && $parameter.openaiOptions.usageReporter.settings.enabled) || $parameter.openaiOptions.enableUsageReporter)) || $parameter.enableUsageReporter) ? [{ type: "ai_tool", displayName: "Usage Reporter", required: false, maxConnections: 1 }] : [] }}',
   );
 
   const geminiOptions = description.properties.find(
     (property) => property.name === 'geminiOptions',
+  );
+  const anthropicOptions = description.properties.find(
+    (property) => property.name === 'anthropicOptions',
   );
   const openaiOptions = description.properties.find(
     (property) => property.name === 'openaiOptions',
@@ -192,7 +197,7 @@ test('Usage Reporter is an optional AI Tool input with configurable privacy cont
     'usageReporter',
   ];
 
-  for (const options of [geminiOptions, openaiOptions]) {
+  for (const options of [geminiOptions, anthropicOptions, openaiOptions]) {
     const nested = Object.fromEntries(
       options.options.map((option) => [option.name, option]),
     );
@@ -5649,5 +5654,317 @@ test('GeminiChatModel streaming sends service_tier in root request payload witho
     global.fetch = originalFetch;
   }
 });
+
+test('Anthropic provider properties and defaults are configured properly', () => {
+  const description = new UniversalChatModel().description;
+  const providerProperty = description.properties.find(
+    (property) => property.name === 'provider',
+  );
+  assert.ok(providerProperty);
+  const anthropicProvider = providerProperty.options.find(
+    (option) => option.value === 'anthropic',
+  );
+  assert.ok(anthropicProvider);
+  assert.equal(anthropicProvider.name, 'Anthropic (Claude)');
+
+  const anthropicModel = description.properties.find(
+    (property) => property.name === 'anthropicModel',
+  );
+  assert.ok(anthropicModel);
+  assert.equal(anthropicModel.default, 'claude-sonnet-5-5');
+  assert.equal(anthropicModel.typeOptions.loadOptionsMethod, 'getAnthropicModels');
+
+  const anthropicOptions = description.properties.find(
+    (property) => property.name === 'anthropicOptions',
+  );
+  assert.ok(anthropicOptions);
+  assert.equal(anthropicOptions.type, 'collection');
+
+  const nested = Object.fromEntries(
+    anthropicOptions.options.map((option) => [option.name, option]),
+  );
+
+  assert.equal(nested.temperature.default, 1.0);
+  assert.equal(nested.maxTokens.default, 8192);
+  assert.equal(nested.maxTokens.typeOptions.minValue, 1);
+  assert.equal(nested.thinking.default, false);
+  assert.equal(nested.thinkingBudget.default, 2048);
+  assert.equal(nested.thinkingBudget.typeOptions.minValue, 1024);
+  assert.equal(nested.baseUrl.default, '');
+});
+
+test('getAnthropicModels returns static fallback models without credentials and queries Anthropic API when credentials exist', async () => {
+  const modelNode = new UniversalChatModel();
+
+  // Test 1: No credentials / empty
+  const contextWithoutCreds = {
+    async getCredentials() {
+      return {};
+    },
+    helpers: {
+      async httpRequest() {
+        throw new Error('Should not be called when credentials have no apiKey');
+      },
+    },
+  };
+
+  const fallbackModels = await modelNode.methods.loadOptions.getAnthropicModels.call(
+    contextWithoutCreds,
+  );
+  assert.ok(Array.isArray(fallbackModels));
+  assert.ok(
+    fallbackModels.some((m) => m.value === 'claude-sonnet-5-5'),
+    'Should include claude-sonnet-5-5 in static fallback',
+  );
+  assert.ok(
+    fallbackModels.some((m) => m.value === 'claude-haiku-5-5'),
+    'Should include claude-haiku-5-5 in static fallback',
+  );
+  assert.ok(
+    fallbackModels.some((m) => m.value === 'claude-opus-5-5'),
+    'Should include claude-opus-5-5 in static fallback',
+  );
+
+  // Test 2: With credentials and HTTP response
+  let capturedHeaders;
+  let capturedUrl;
+  const contextWithCreds = {
+    async getCredentials() {
+      return {
+        apiKey: 'sk-ant-api-test-key',
+        baseUrl: 'https://api.anthropic.com',
+      };
+    },
+    helpers: {
+      async httpRequest(options) {
+        capturedUrl = options.url;
+        capturedHeaders = options.headers;
+        return {
+          data: [
+            {
+              id: 'claude-sonnet-5-5',
+              display_name: 'Claude Sonnet 5.5',
+            },
+            {
+              id: 'claude-haiku-5-5',
+              display_name: 'Claude Haiku 5.5',
+            },
+          ],
+        };
+      },
+    },
+  };
+
+  const dynamicModels = await modelNode.methods.loadOptions.getAnthropicModels.call(
+    contextWithCreds,
+  );
+  assert.equal(capturedUrl, 'https://api.anthropic.com/v1/models');
+  assert.equal(capturedHeaders['x-api-key'], 'sk-ant-api-test-key');
+  assert.equal(capturedHeaders['anthropic-version'], '2023-06-01');
+  assert.equal(dynamicModels.length, 2);
+  assert.equal(dynamicModels[0].name, 'Claude Sonnet 5.5 (claude-sonnet-5-5)');
+  assert.equal(dynamicModels[0].value, 'claude-sonnet-5-5');
+});
+
+test('Anthropic supplyData enforces Extended Thinking rules', async () => {
+  const modelNode = new UniversalChatModel();
+
+  // Case 1: thinkingBudget < 1024
+  const contextBudgetTooLow = {
+    getNodeParameter(name, _idx, fallback) {
+      if (name === 'provider') return 'anthropic';
+      if (name === 'anthropicOptions') {
+        return {
+          thinking: true,
+          thinkingBudget: 500,
+        };
+      }
+      return fallback;
+    },
+    async getCredentials() {
+      return { apiKey: 'sk-ant-test' };
+    },
+    getNode() {
+      return { name: 'Universal Chat Model', parameters: {} };
+    },
+  };
+
+  await assert.rejects(
+    async () => {
+      await modelNode.supplyData.call(contextBudgetTooLow, 0);
+    },
+    /Thinking Budget must be at least 1024 tokens/,
+  );
+
+  // Case 2: maxTokens <= thinkingBudget
+  const contextMaxTokensTooSmall = {
+    getNodeParameter(name, _idx, fallback) {
+      if (name === 'provider') return 'anthropic';
+      if (name === 'anthropicOptions') {
+        return {
+          thinking: true,
+          thinkingBudget: 4096,
+          maxTokens: 2048,
+        };
+      }
+      return fallback;
+    },
+    async getCredentials() {
+      return { apiKey: 'sk-ant-test' };
+    },
+    getNode() {
+      return { name: 'Universal Chat Model', parameters: {} };
+    },
+  };
+
+  await assert.rejects(
+    async () => {
+      await modelNode.supplyData.call(contextMaxTokensTooSmall, 0);
+    },
+    /Max Output Tokens .* must be greater than Thinking Budget/,
+  );
+
+  // Case 3: temperature !== 1.0 with thinking enabled
+  const contextInvalidTemperature = {
+    getNodeParameter(name, _idx, fallback) {
+      if (name === 'provider') return 'anthropic';
+      if (name === 'anthropicOptions') {
+        return {
+          thinking: true,
+          thinkingBudget: 2048,
+          maxTokens: 4096,
+          temperature: 0.5,
+        };
+      }
+      return fallback;
+    },
+    async getCredentials() {
+      return { apiKey: 'sk-ant-test' };
+    },
+    getNode() {
+      return { name: 'Universal Chat Model', parameters: {} };
+    },
+  };
+
+  await assert.rejects(
+    async () => {
+      await modelNode.supplyData.call(contextInvalidTemperature, 0);
+    },
+    /Anthropic requires Temperature to be 1.0/,
+  );
+});
+
+test('Anthropic model call retries on HTTP 529 (Overloaded Error) and normalizes token usage', async () => {
+  const originalFetch = global.fetch;
+  let calls = 0;
+  const requestBodies = [];
+
+  global.fetch = async (request, init) => {
+    calls += 1;
+    const bodyText = typeof init?.body === 'string' ? init.body : await request.text?.();
+    if (bodyText) {
+      try {
+        requestBodies.push(JSON.parse(bodyText));
+      } catch {
+        requestBodies.push(bodyText);
+      }
+    }
+
+    if (calls === 1) {
+      return new Response(
+        JSON.stringify({
+          type: 'error',
+          error: {
+            type: 'overloaded_error',
+            message: 'Anthropic is temporarily overloaded',
+          },
+        }),
+        {
+          status: 529,
+          headers: {
+            'content-type': 'application/json',
+            'request-id': 'req_529_test',
+          },
+        },
+      );
+    }
+
+    return new Response(
+      JSON.stringify({
+        id: 'msg_test_claude',
+        type: 'message',
+        role: 'assistant',
+        content: [
+          {
+            type: 'text',
+            text: 'Resposta Anthropic Claude',
+          },
+        ],
+        model: 'claude-sonnet-5-5',
+        stop_reason: 'end_turn',
+        usage: {
+          input_tokens: 22,
+          output_tokens: 14,
+        },
+      }),
+      {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          'request-id': 'req_200_test',
+        },
+      },
+    );
+  };
+
+  const parameters = {
+    provider: 'anthropic',
+    anthropicModel: 'claude-sonnet-5-5',
+    anthropicOptions: {
+      maxTokens: 4096,
+      temperature: 0.7,
+      systemMessage: 'Voce e um assistente prestativo.',
+    },
+    modelRetryOnFail: true,
+    modelMaxTries: 3,
+    modelWaitBetweenTries: 0,
+  };
+
+  const context = {
+    getNodeParameter(name, _itemIndex, fallback) {
+      return parameters[name] ?? fallback;
+    },
+    async getCredentials() {
+      return {
+        apiKey: 'sk-ant-test-key-12345678',
+      };
+    },
+    getNode() {
+      return { name: 'Universal Chat Model', parameters };
+    },
+    addInputData() {
+      return { index: 0 };
+    },
+    addOutputData() {},
+    getNextRunIndex() {
+      return 0;
+    },
+    logAiEvent() {},
+  };
+
+  try {
+    const supplied = await new UniversalChatModel().supplyData.call(context, 0);
+    const response = await supplied.response.invoke('Ola Claude!');
+
+    assert.equal(calls, 2, 'Should have retried after HTTP 529 and succeeded on 2nd attempt');
+    assert.equal(response.text, 'Resposta Anthropic Claude');
+    assert.ok(requestBodies.length >= 2, 'Captured request bodies');
+    assert.equal(requestBodies[0].model, 'claude-sonnet-5-5');
+    assert.equal(requestBodies[0].max_tokens, 4096);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 
 

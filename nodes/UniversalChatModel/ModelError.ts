@@ -1,4 +1,4 @@
-export type ModelProvider = 'gemini' | 'openai_compatible';
+export type ModelProvider = 'gemini' | 'openai_compatible' | 'anthropic';
 
 export type ModelErrorCategory =
   | 'authentication'
@@ -48,7 +48,7 @@ export interface NormalizedModelError {
 
 type UnknownRecord = Record<string, unknown>;
 
-const RETRYABLE_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+const RETRYABLE_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504, 529]);
 const RETRYABLE_TRANSPORT_CODES = new Set([
   'EAI_AGAIN',
   'ECONNREFUSED',
@@ -218,9 +218,11 @@ function codeFrom(
 ): string | undefined {
   const candidates = [
     nestedError?.code,
+    nestedError?.type,
     record.code,
     cause?.code,
     asRecord(record.error)?.code,
+    asRecord(record.error)?.type,
   ];
   for (const candidate of candidates) {
     const value = stringValue(candidate);
@@ -359,6 +361,9 @@ function classify(
   if (statusCode === 429 || /rate.?limit|too many requests/i.test(combined)) {
     return 'rate_limit';
   }
+  if (statusCode === 529 || /overloaded_error/i.test(combined)) {
+    return 'server';
+  }
   if (statusCode !== undefined && statusCode >= 500) return 'server';
   if (
     statusCode === 400 ||
@@ -438,11 +443,14 @@ function defaultRetryable(
   if (category === 'cancelled') return false;
   if (statusCode !== undefined) return RETRYABLE_HTTP_STATUSES.has(statusCode);
   if (code && RETRYABLE_TRANSPORT_CODES.has(code.toUpperCase())) return true;
+  if (code && code.toLowerCase() === 'overloaded_error') return true;
   return category === 'network' || category === 'dns' || category === 'connection';
 }
 
 function providerLabel(provider: ModelProvider): string {
-  return provider === 'gemini' ? 'Gemini' : 'OpenAI-compatible';
+  if (provider === 'gemini') return 'Gemini';
+  if (provider === 'anthropic') return 'Anthropic';
+  return 'OpenAI-compatible';
 }
 
 export function formatNormalizedModelError(details: NormalizedModelError): string {
@@ -497,6 +505,7 @@ export function normalizeModelError(
     ...headerRecord(record.headers),
   };
   const requestId =
+    headers['request-id'] ??
     headers['x-request-id'] ??
     headers['x-goog-request-id'] ??
     headers['x-correlation-id'];
