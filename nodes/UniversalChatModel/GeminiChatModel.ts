@@ -23,6 +23,27 @@ export interface GeminiUsageMetadata {
   [key: string]: unknown;
 }
 
+export interface GeminiGroundingSource {
+  title?: string;
+  url?: string;
+}
+
+export interface GeminiGroundingMetadata {
+  queries?: string[];
+  sources?: GeminiGroundingSource[];
+  supports?: unknown[];
+  searchEntryPoint?: unknown;
+  [key: string]: unknown;
+}
+
+export interface GeminiCodeExecution {
+  language?: string;
+  code?: string;
+  outcome?: string;
+  output?: string;
+  [key: string]: unknown;
+}
+
 export interface GeminiResponseMetadata {
   usageMetadata?: GeminiUsageMetadata;
   modelVersion?: string;
@@ -31,6 +52,8 @@ export interface GeminiResponseMetadata {
   promptFeedback?: unknown;
   thoughts?: unknown[];
   functionCalls?: unknown[];
+  grounding?: GeminiGroundingMetadata;
+  codeExecutions?: GeminiCodeExecution[];
   serviceTier?: string;
   requestDetails?: GeminiRequestDetail[];
   [key: string]: unknown;
@@ -52,6 +75,8 @@ interface CaptureContext {
   hasFunctionCall: boolean;
   hasNonThoughtOutput: boolean;
   functionCalls: unknown[];
+  grounding?: GeminiGroundingMetadata;
+  codeExecutions: GeminiCodeExecution[];
   providerRequestMs: number;
   metadataCaptureMs: number;
   adapterTotalMs: number;
@@ -203,6 +228,111 @@ function mergeUniqueFunctionCalls(existing: unknown, incoming: unknown[]): unkno
   });
 }
 
+function extractGroundingFromCandidate(
+  candidate: Record<string, unknown>,
+): GeminiGroundingMetadata | undefined {
+  const raw =
+    asRecord(candidate.groundingMetadata) ??
+    asRecord(candidate.grounding_metadata);
+  if (!raw) return undefined;
+
+  const rawQueries = Array.isArray(raw.webSearchQueries)
+    ? raw.webSearchQueries
+    : Array.isArray(raw.web_search_queries)
+      ? raw.web_search_queries
+      : [];
+  const queries = rawQueries.filter(
+    (q): q is string => typeof q === 'string' && q.trim().length > 0,
+  );
+
+  const rawChunks = Array.isArray(raw.groundingChunks)
+    ? raw.groundingChunks
+    : Array.isArray(raw.grounding_chunks)
+      ? raw.grounding_chunks
+      : [];
+  const sources: GeminiGroundingSource[] = [];
+  for (const chunkValue of rawChunks) {
+    const chunk = asRecord(chunkValue);
+    const web = asRecord(chunk?.web);
+    const url =
+      typeof web?.uri === 'string'
+        ? web.uri
+        : typeof web?.url === 'string'
+          ? web.url
+          : undefined;
+    const title = typeof web?.title === 'string' ? web.title : undefined;
+    if (url || title) {
+      sources.push({
+        ...(title ? { title } : {}),
+        ...(url ? { url } : {}),
+      });
+    }
+  }
+
+  const supports = Array.isArray(raw.groundingSupports)
+    ? raw.groundingSupports
+    : Array.isArray(raw.grounding_supports)
+      ? raw.grounding_supports
+      : undefined;
+
+  const searchEntryPoint = raw.searchEntryPoint ?? raw.search_entry_point;
+
+  if (queries.length === 0 && sources.length === 0 && !supports && !searchEntryPoint) {
+    return undefined;
+  }
+
+  return {
+    ...(queries.length > 0 ? { queries } : {}),
+    ...(sources.length > 0 ? { sources } : {}),
+    ...(supports ? { supports: structuredClone(supports) } : {}),
+    ...(searchEntryPoint ? { searchEntryPoint: structuredClone(searchEntryPoint) } : {}),
+  };
+}
+
+function mergeGroundingMetadata(
+  existing?: GeminiGroundingMetadata,
+  incoming?: GeminiGroundingMetadata,
+): GeminiGroundingMetadata | undefined {
+  if (!existing) return incoming ? structuredClone(incoming) : undefined;
+  if (!incoming) return structuredClone(existing);
+
+  const queries = [
+    ...new Set([...(existing.queries ?? []), ...(incoming.queries ?? [])]),
+  ];
+  const seenUrls = new Set<string>();
+  const sources: GeminiGroundingSource[] = [];
+  for (const src of [...(existing.sources ?? []), ...(incoming.sources ?? [])]) {
+    const key = src.url ?? src.title ?? '';
+    if (key && seenUrls.has(key)) continue;
+    if (key) seenUrls.add(key);
+    sources.push(structuredClone(src));
+  }
+  const supports = [
+    ...(Array.isArray(existing.supports) ? existing.supports : []),
+    ...(Array.isArray(incoming.supports) ? incoming.supports : []),
+  ];
+
+  return {
+    ...(queries.length > 0 ? { queries } : {}),
+    ...(sources.length > 0 ? { sources } : {}),
+    ...(supports.length > 0 ? { supports } : {}),
+    ...(incoming.searchEntryPoint ?? existing.searchEntryPoint
+      ? { searchEntryPoint: incoming.searchEntryPoint ?? existing.searchEntryPoint }
+      : {}),
+  };
+}
+
+function mergeCodeExecutions(
+  existing?: GeminiCodeExecution[],
+  incoming?: GeminiCodeExecution[],
+): GeminiCodeExecution[] | undefined {
+  const merged = [
+    ...(Array.isArray(existing) ? existing : []),
+    ...(Array.isArray(incoming) ? incoming : []),
+  ];
+  return merged.length > 0 ? structuredClone(merged) : undefined;
+}
+
 function capturePayload(payload: unknown, defaultServiceTier?: string): void {
   if (!payload || typeof payload !== 'object') return;
 
@@ -220,18 +350,28 @@ function capturePayload(payload: unknown, defaultServiceTier?: string): void {
   const candidates = Array.isArray(source.candidates) ? source.candidates : [];
   for (const candidateValue of candidates) {
     const candidate = asRecord(candidateValue);
-    if (typeof candidate?.finishReason === 'string') {
+    if (!candidate) continue;
+
+    if (typeof candidate.finishReason === 'string') {
       context.finishReasons.push(candidate.finishReason);
     }
-    if (typeof candidate?.finishMessage === 'string') {
+    if (typeof candidate.finishMessage === 'string') {
       context.finishMessages.push(candidate.finishMessage);
     }
 
-    const content = asRecord(candidate?.content);
+    const grounding = extractGroundingFromCandidate(candidate);
+    if (grounding) {
+      context.grounding = mergeGroundingMetadata(context.grounding, grounding);
+    }
+
+    const content = asRecord(candidate.content);
     const parts = Array.isArray(content?.parts) ? content.parts : [];
+    let currentCodeExec: GeminiCodeExecution | undefined;
+
     for (const partValue of parts) {
       const part = asRecord(partValue);
       if (!part) continue;
+
       const functionCall =
         asRecord(part.functionCall) ?? asRecord(part.function_call);
       if (functionCall) {
@@ -243,6 +383,47 @@ function capturePayload(payload: unknown, defaultServiceTier?: string): void {
         });
         continue;
       }
+
+      const executableCode =
+        asRecord(part.executableCode) ?? asRecord(part.executable_code);
+      if (executableCode) {
+        context.hasNonThoughtOutput = true;
+        const code =
+          typeof executableCode.code === 'string'
+            ? executableCode.code
+            : undefined;
+        const language =
+          typeof executableCode.language === 'string'
+            ? executableCode.language.toLowerCase()
+            : 'python';
+        currentCodeExec = { language, code };
+        context.codeExecutions.push(currentCodeExec);
+      }
+
+      const codeExecutionResult =
+        asRecord(part.codeExecutionResult) ?? asRecord(part.code_execution_result);
+      if (codeExecutionResult) {
+        context.hasNonThoughtOutput = true;
+        const outcome =
+          typeof codeExecutionResult.outcome === 'string'
+            ? codeExecutionResult.outcome
+            : undefined;
+        const output =
+          typeof codeExecutionResult.output === 'string'
+            ? codeExecutionResult.output
+            : undefined;
+        if (currentCodeExec) {
+          if (outcome) currentCodeExec.outcome = outcome;
+          if (output !== undefined) currentCodeExec.output = output;
+        } else {
+          context.codeExecutions.push({
+            language: 'python',
+            outcome,
+            output,
+          });
+        }
+      }
+
       if (isThoughtBlock(part)) continue;
       if (typeof part.text === 'string') {
         if (part.text.trim().length > 0) context.hasNonThoughtOutput = true;
@@ -291,6 +472,10 @@ function capturePayload(payload: unknown, defaultServiceTier?: string): void {
           ),
         }
       : {}),
+    ...(context.grounding ? { grounding: structuredClone(context.grounding) } : {}),
+    ...(context.codeExecutions.length > 0
+      ? { codeExecutions: structuredClone(context.codeExecutions) }
+      : {}),
   };
 }
 
@@ -302,6 +487,7 @@ function createCaptureContext(): CaptureContext {
     hasFunctionCall: false,
     hasNonThoughtOutput: false,
     functionCalls: [],
+    codeExecutions: [],
     providerRequestMs: 0,
     metadataCaptureMs: 0,
     adapterTotalMs: 0,
@@ -310,6 +496,38 @@ function createCaptureContext(): CaptureContext {
 
 function jsonSnapshot<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function ensureServerSideToolConfig(
+  target: Record<string, any>,
+  currentTools: unknown[],
+  fallbackToolConfig?: unknown,
+): void {
+  const hasServerSideTool = currentTools.some(
+    (t: any) => t && typeof t === 'object' && ('googleSearch' in t || 'codeExecution' in t),
+  );
+  const hasFunctionDeclarations = currentTools.some(
+    (t: any) =>
+      t &&
+      typeof t === 'object' &&
+      (Array.isArray(t.functionDeclarations) || 'functionDeclarations' in t),
+  );
+
+  if (hasServerSideTool && hasFunctionDeclarations) {
+    const existing =
+      (target.toolConfig && typeof target.toolConfig === 'object'
+        ? (target.toolConfig as Record<string, unknown>)
+        : undefined) ??
+      (fallbackToolConfig && typeof fallbackToolConfig === 'object'
+        ? (fallbackToolConfig as Record<string, unknown>)
+        : undefined) ??
+      {};
+
+    target.toolConfig = {
+      ...existing,
+      includeServerSideToolInvocations: true,
+    };
+  }
 }
 
 function effectiveRequest(client: any, params: unknown): Record<string, unknown> {
@@ -685,6 +903,15 @@ function mergeResponseMetadata(
     ),
   );
   const usageMetadata = mergeUsageMetadata(responses);
+  const grounding = contexts.reduce<GeminiGroundingMetadata | undefined>(
+    (acc, ctx) => mergeGroundingMetadata(acc, ctx.response?.grounding ?? ctx.grounding),
+    undefined,
+  );
+  const codeExecutions = contexts.reduce<GeminiCodeExecution[] | undefined>(
+    (acc, ctx) =>
+      mergeCodeExecutions(acc, ctx.response?.codeExecutions ?? ctx.codeExecutions),
+    undefined,
+  );
   const providerRequestMs = contexts.reduce(
     (total, context) => total + context.providerRequestMs,
     0,
@@ -709,6 +936,8 @@ function mergeResponseMetadata(
       : {}),
     ...(thoughts.length > 0 ? { thoughts } : {}),
     ...(functionCalls.length > 0 ? { functionCalls } : {}),
+    ...(grounding ? { grounding } : {}),
+    ...(codeExecutions && codeExecutions.length > 0 ? { codeExecutions } : {}),
     ...(adapterTotalMs > 0
       ? {
           clientTiming: {
@@ -846,6 +1075,10 @@ function augmentMessage(
   message.response_metadata = {
     ...message.response_metadata,
     gemini,
+    ...(response.grounding ? { grounding: structuredClone(response.grounding) } : {}),
+    ...(response.codeExecutions && response.codeExecutions.length > 0
+      ? { codeExecutions: structuredClone(response.codeExecutions) }
+      : {}),
   };
   message.additional_kwargs = {
     ...message.additional_kwargs,
@@ -929,6 +1162,8 @@ export class GeminiChatModel extends ChatGoogleGenerativeAI {
   private readonly recoverEmptyResponses: boolean;
   private readonly requestTimeoutMs: number;
   private readonly serviceTier?: string;
+  readonly enableGoogleSearch: boolean;
+  readonly enableCodeExecution: boolean;
 
   constructor(fields: Record<string, unknown>, onUsage?: (metadata: GeminiUsageMetadata) => void) {
     super({
@@ -936,6 +1171,8 @@ export class GeminiChatModel extends ChatGoogleGenerativeAI {
       model: String(fields.model ?? ''),
     } as any);
     this.onUsage = onUsage;
+    this.enableGoogleSearch = fields.enableGoogleSearch === true;
+    this.enableCodeExecution = fields.enableCodeExecution === true;
     this.serviceTier =
       typeof fields.serviceTier === 'string' && fields.serviceTier.trim().length > 0
         ? fields.serviceTier.trim()
@@ -966,6 +1203,19 @@ export class GeminiChatModel extends ChatGoogleGenerativeAI {
       delete (this as any).client.generationConfig.serviceTier;
     }
 
+    if ((this.enableGoogleSearch || this.enableCodeExecution) && (this as any).client) {
+      const client = (this as any).client;
+      const clientTools = Array.isArray(client.tools) ? [...client.tools] : [];
+      if (this.enableGoogleSearch && !clientTools.some((t: any) => t && typeof t === 'object' && 'googleSearch' in t)) {
+        clientTools.push({ googleSearch: {} });
+      }
+      if (this.enableCodeExecution && !clientTools.some((t: any) => t && typeof t === 'object' && 'codeExecution' in t)) {
+        clientTools.push({ codeExecution: {} });
+      }
+      client.tools = clientTools;
+      ensureServerSideToolConfig(client, clientTools);
+    }
+
     const client = (this as any).client;
     if (client && typeof client.generateContent === 'function') {
       const generateContent = client.generateContent.bind(client);
@@ -979,6 +1229,29 @@ export class GeminiChatModel extends ChatGoogleGenerativeAI {
           if (req.generationConfig && typeof req.generationConfig === 'object') {
             delete (req.generationConfig as any).service_tier;
             delete (req.generationConfig as any).serviceTier;
+          }
+          if (this.enableGoogleSearch || this.enableCodeExecution) {
+            const currentTools = Array.isArray(req.tools)
+              ? [...req.tools]
+              : (Array.isArray(client?.tools) ? [...client.tools] : []);
+            if (this.enableGoogleSearch) {
+              const hasGoogleSearch = currentTools.some(
+                (t: any) => t && typeof t === 'object' && 'googleSearch' in t,
+              );
+              if (!hasGoogleSearch) {
+                currentTools.push({ googleSearch: {} });
+              }
+            }
+            if (this.enableCodeExecution) {
+              const hasCodeExecution = currentTools.some(
+                (t: any) => t && typeof t === 'object' && 'codeExecution' in t,
+              );
+              if (!hasCodeExecution) {
+                currentTools.push({ codeExecution: {} });
+              }
+            }
+            req.tools = currentTools;
+            ensureServerSideToolConfig(req, currentTools, client?.toolConfig);
           }
         }
         const context = responseCapture.getStore();
@@ -1023,6 +1296,29 @@ export class GeminiChatModel extends ChatGoogleGenerativeAI {
           if (req.generationConfig && typeof req.generationConfig === 'object') {
             delete (req.generationConfig as any).service_tier;
             delete (req.generationConfig as any).serviceTier;
+          }
+          if (this.enableGoogleSearch || this.enableCodeExecution) {
+            const currentTools = Array.isArray(req.tools)
+              ? [...req.tools]
+              : (Array.isArray(client?.tools) ? [...client.tools] : []);
+            if (this.enableGoogleSearch) {
+              const hasGoogleSearch = currentTools.some(
+                (t: any) => t && typeof t === 'object' && 'googleSearch' in t,
+              );
+              if (!hasGoogleSearch) {
+                currentTools.push({ googleSearch: {} });
+              }
+            }
+            if (this.enableCodeExecution) {
+              const hasCodeExecution = currentTools.some(
+                (t: any) => t && typeof t === 'object' && 'codeExecution' in t,
+              );
+              if (!hasCodeExecution) {
+                currentTools.push({ codeExecution: {} });
+              }
+            }
+            req.tools = currentTools;
+            ensureServerSideToolConfig(req, currentTools, client?.toolConfig);
           }
         }
         const context = responseCapture.getStore();
@@ -1113,8 +1409,31 @@ export class GeminiChatModel extends ChatGoogleGenerativeAI {
       }
     }
 
+    const currentTools = Array.isArray(params.tools)
+      ? [...params.tools]
+      : (Array.isArray((this as any).client?.tools) ? [...(this as any).client.tools] : []);
+
+    if (this.enableGoogleSearch) {
+      if (!currentTools.some((t: any) => t && typeof t === 'object' && 'googleSearch' in t)) {
+        currentTools.push({ googleSearch: {} });
+      }
+    }
+    if (this.enableCodeExecution) {
+      if (!currentTools.some((t: any) => t && typeof t === 'object' && 'codeExecution' in t)) {
+        currentTools.push({ codeExecution: {} });
+      }
+    }
+
+    const toolConfigHolder: Record<string, any> = {};
+    if (params.toolConfig) {
+      toolConfigHolder.toolConfig = params.toolConfig;
+    }
+    ensureServerSideToolConfig(toolConfigHolder, currentTools, (this as any).client?.toolConfig);
+
     return {
       ...params,
+      ...(currentTools.length > 0 ? { tools: currentTools } : {}),
+      ...(toolConfigHolder.toolConfig ? { toolConfig: toolConfigHolder.toolConfig } : {}),
       ...(this.serviceTier ? { service_tier: this.serviceTier } : {}),
       ...(generationConfig
         ? { generationConfig: { ...generationConfig } }
@@ -1305,5 +1624,41 @@ export class GeminiChatModel extends ChatGoogleGenerativeAI {
     }
     if (response?.usageMetadata) this.onUsage?.(response.usageMetadata);
     for (const chunk of recoveryChunks) yield chunk;
+  }
+
+  override bindTools(tools: any[], kwargs?: any): any {
+    const combined = [...(tools || [])];
+    if (this.enableGoogleSearch) {
+      const hasGoogleSearch = combined.some(
+        (t: any) => t && typeof t === 'object' && 'googleSearch' in t,
+      );
+      if (!hasGoogleSearch) {
+        combined.push({ googleSearch: {} });
+      }
+    }
+    if (this.enableCodeExecution) {
+      const hasCodeExecution = combined.some(
+        (t: any) => t && typeof t === 'object' && 'codeExecution' in t,
+      );
+      if (!hasCodeExecution) {
+        combined.push({ codeExecution: {} });
+      }
+    }
+    const boundKwargs = { ...(kwargs || {}) };
+    const hasServerSideTool = combined.some(
+      (t: any) => t && typeof t === 'object' && ('googleSearch' in t || 'codeExecution' in t),
+    );
+    const hasOtherTools = combined.some(
+      (t: any) => t && typeof t === 'object' && !('googleSearch' in t) && !('codeExecution' in t),
+    );
+
+    if (hasServerSideTool && hasOtherTools) {
+      boundKwargs.toolConfig = {
+        ...(boundKwargs.toolConfig || {}),
+        includeServerSideToolInvocations: true,
+      };
+    }
+
+    return super.bindTools(combined, boundKwargs);
   }
 }

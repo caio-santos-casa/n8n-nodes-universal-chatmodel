@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-universal-chatmodel",
-  "version": "1.0.38",
+  "version": "1.0.39",
   "description": "Production-oriented n8n community Chat Model for native Google Gemini, Anthropic Claude, and OpenAI-compatible APIs",
   "keywords": [
     "n8n-community-node-package",
@@ -56,7 +56,6 @@
     ],
     "credentials": [
       "dist/credentials/GoogleGeminiApi.credentials.js",
-      "dist/credentials/AnthropicApi.credentials.js",
       "dist/credentials/OpenAiCompatibleApi.credentials.js"
     ]
   },

@@ -12,7 +12,7 @@ import {
 } from 'n8n-workflow';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, parse } from 'node:path';
-import { ChatAnthropic } from '@langchain/anthropic';
+import { AnthropicChatModel } from './AnthropicChatModel';
 import { ChatOpenAI } from '@langchain/openai';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import {
@@ -49,6 +49,7 @@ interface UsageReportingOptions {
   systemMessage?: string;
   includeTokenUsageInAgentOutput?: boolean;
   includeIntermediateStepsInOutput?: boolean;
+  includeServerToolDetailsInOutput?: boolean;
   enableUsageReporter?: boolean;
   nodeLabel?: string;
   inputTextMode?: 'label' | 'prompt';
@@ -259,6 +260,14 @@ function sharedModelOptions(): INodeProperties[] {
         'Whether compatible agent outputs include a compact list of tool steps. Internal LangChain messages and Gemini signatures are always removed.',
     },
     {
+      displayName: 'Include Server-Side Tool Details in Output',
+      name: 'includeServerToolDetailsInOutput',
+      type: 'boolean',
+      default: true,
+      description:
+        'Whether compatible parent-node outputs include structured grounding and codeExecutions fields for native server-side tools.',
+    },
+    {
       displayName: 'Usage Reporter',
       name: 'usageReporter',
       type: 'fixedCollection',
@@ -419,6 +428,11 @@ function resolveSharedModelOptions(
       (typeof legacy.includeIntermediateStepsInOutput === 'boolean'
         ? legacy.includeIntermediateStepsInOutput
         : false),
+    includeServerToolDetailsInOutput:
+      providerOptions.includeServerToolDetailsInOutput ??
+      (typeof legacy.includeServerToolDetailsInOutput === 'boolean'
+        ? legacy.includeServerToolDetailsInOutput
+        : true),
     enableUsageReporter:
       groupedReporting.enabled ??
       providerOptions.enableUsageReporter ??
@@ -1263,6 +1277,25 @@ export class UniversalChatModel implements INodeType {
               },
             ],
           },
+          {
+            displayName: 'Server-Side Tools',
+            name: 'serverSideTools',
+            type: 'multiOptions',
+            options: [
+              {
+                name: 'Google Search Grounding',
+                value: 'googleSearch',
+                description: 'Real-time Google search grounding with live web information and citations',
+              },
+              {
+                name: 'Python Code Execution',
+                value: 'codeExecution',
+                description: 'Sandboxed Python code execution directly on Google infrastructure',
+              },
+            ],
+            default: [],
+            description: 'Native tools executed directly on Google servers during model generation',
+          },
           ...sharedModelOptions(),
         ],
       },
@@ -1354,6 +1387,72 @@ export class UniversalChatModel implements INodeType {
             default: '',
             placeholder: 'https://api.anthropic.com',
             description: 'Override API base URL for proxies or custom enterprise gateways',
+          },
+          {
+            displayName: 'Server-Side Tools',
+            name: 'serverSideTools',
+            type: 'multiOptions',
+            options: [
+              {
+                name: 'Web Search',
+                value: 'webSearch',
+                description: 'Allow Claude to autonomously search the web for up-to-date information and citations',
+              },
+              {
+                name: 'Web Fetch',
+                value: 'webFetch',
+                description: 'Allow Claude to fetch and parse content from web URLs and PDFs directly',
+              },
+              {
+                name: 'Python Code Execution',
+                value: 'codeExecution',
+                description: 'Allow Claude to write and run Python code in a secure sandboxed environment',
+              },
+            ],
+            default: [],
+            description: 'Native server-side tools executed directly by Anthropic servers during inference',
+          },
+          {
+            displayName: 'Web Search Max Uses',
+            name: 'webSearchMaxUses',
+            type: 'number',
+            typeOptions: { minValue: 1, maxValue: 20 },
+            default: 5,
+            displayOptions: {
+              show: {
+                serverSideTools: ['webSearch'],
+              },
+            },
+            description:
+              'Maximum number of web searches Claude can execute per request (1 to 20).',
+          },
+          {
+            displayName: 'Web Search Allowed Domains',
+            name: 'webSearchAllowedDomains',
+            type: 'string',
+            default: '',
+            placeholder: 'docs.python.org, github.com',
+            displayOptions: {
+              show: {
+                serverSideTools: ['webSearch'],
+              },
+            },
+            description:
+              'Optional comma-separated list of domains to restrict web search queries to (e.g. "docs.python.org, github.com").',
+          },
+          {
+            displayName: 'Web Fetch Max Uses',
+            name: 'webFetchMaxUses',
+            type: 'number',
+            typeOptions: { minValue: 1, maxValue: 20 },
+            default: 5,
+            displayOptions: {
+              show: {
+                serverSideTools: ['webFetch'],
+              },
+            },
+            description:
+              'Maximum number of web pages or documents Claude can fetch per request (1 to 20).',
           },
           ...sharedModelOptions(),
         ],
@@ -1642,6 +1741,8 @@ export class UniversalChatModel implements INodeType {
         recoverEmptyResponses?: boolean;
         safetySettings?: { values?: Array<{ category: string; threshold: string }> };
         serviceTier?: string;
+        serverSideTools?: string[];
+        enableGoogleSearch?: boolean;
       };
 
       // Preserve values from workflows created with the pre-collection UI.
@@ -1732,6 +1833,10 @@ export class UniversalChatModel implements INodeType {
         }
       }
 
+      const geminiServerTools = Array.isArray(opts.serverSideTools) ? opts.serverSideTools : [];
+      const enableGoogleSearch = opts.enableGoogleSearch === true || geminiServerTools.includes('googleSearch');
+      const enableCodeExecution = geminiServerTools.includes('codeExecution');
+
       const modelInput: any = {
         apiKey: geminiApiKey,
         model: geminiModel,
@@ -1739,6 +1844,8 @@ export class UniversalChatModel implements INodeType {
         recoverEmptyResponses: opts.recoverEmptyResponses !== false,
         requestTimeoutMs: opts.requestTimeoutMs ?? 60_000,
         includeRequestDetailsInOutput: opts.includeRequestDetailsInOutput === true,
+        enableGoogleSearch,
+        enableCodeExecution,
       };
       const usageReporter = await createUsageReporter(
         this,
@@ -1756,6 +1863,7 @@ export class UniversalChatModel implements INodeType {
           sharedOptions.includeIntermediateStepsInOutput === true,
           usageReporter,
           sharedOptions.failOnReporterError === true,
+          sharedOptions.includeServerToolDetailsInOutput !== false,
         ),
       ];
 
@@ -1790,7 +1898,9 @@ export class UniversalChatModel implements INodeType {
         throw new Error('Anthropic API Key is required. Configure the Anthropic API credential.');
       }
       let credBaseUrl =
-        creds && typeof creds.baseUrl === 'string' ? creds.baseUrl.trim() : '';
+        creds && (typeof creds.url === 'string' || typeof creds.baseUrl === 'string')
+          ? String(creds.url || creds.baseUrl).trim()
+          : '';
 
       // Resolve model
       let anthropicModel = this.getNodeParameter('anthropicModel', executionItemIndex, 'claude-sonnet-5-5') as string;
@@ -1806,6 +1916,11 @@ export class UniversalChatModel implements INodeType {
         thinking?: boolean;
         thinkingBudget?: number;
         baseUrl?: string;
+        serverSideTools?: string[];
+        enableWebSearch?: boolean;
+        webSearchMaxUses?: number;
+        webSearchAllowedDomains?: string;
+        webFetchMaxUses?: number;
       };
       const sharedOptions = resolveSharedModelOptions(this, opts);
 
@@ -1872,10 +1987,37 @@ export class UniversalChatModel implements INodeType {
           sharedOptions.includeIntermediateStepsInOutput === true,
           usageReporter,
           sharedOptions.failOnReporterError === true,
+          sharedOptions.includeServerToolDetailsInOutput !== false,
         ),
       ];
 
-      let model: BaseChatModel = new ChatAnthropic(modelOptions);
+      const anthropicServerTools = Array.isArray(opts.serverSideTools) ? opts.serverSideTools : [];
+      const enableWebSearch = opts.enableWebSearch === true || anthropicServerTools.includes('webSearch');
+      const enableWebFetch = anthropicServerTools.includes('webFetch');
+      const enableCodeExecution = anthropicServerTools.includes('codeExecution');
+
+      const allowedDomains =
+        typeof opts.webSearchAllowedDomains === 'string' &&
+        opts.webSearchAllowedDomains.trim().length > 0
+          ? opts.webSearchAllowedDomains
+              .split(',')
+              .map((d) => d.trim())
+              .filter((d) => d.length > 0)
+          : undefined;
+
+      const serverToolsOptions =
+        enableWebSearch || enableWebFetch || enableCodeExecution
+          ? {
+              enableWebSearch,
+              webSearchMaxUses: opts.webSearchMaxUses ?? 5,
+              webSearchAllowedDomains: allowedDomains,
+              enableWebFetch,
+              webFetchMaxUses: opts.webFetchMaxUses ?? 5,
+              enableCodeExecution,
+            }
+          : undefined;
+
+      let model: BaseChatModel = new AnthropicChatModel(modelOptions, serverToolsOptions);
       model = applySystemMessage(model, sharedOptions.systemMessage ?? '');
 
       return {
@@ -1962,6 +2104,7 @@ export class UniversalChatModel implements INodeType {
           sharedOptions.includeIntermediateStepsInOutput === true,
           usageReporter,
           sharedOptions.failOnReporterError === true,
+          sharedOptions.includeServerToolDetailsInOutput !== false,
         ),
       ];
 

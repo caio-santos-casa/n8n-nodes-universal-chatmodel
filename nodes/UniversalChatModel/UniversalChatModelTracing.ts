@@ -9,6 +9,7 @@ import {
 } from 'n8n-workflow';
 
 import type { GeminiRequestDetail, GeminiResponseMetadata, GeminiUsageMetadata } from './GeminiChatModel';
+import { augmentAnthropicMessage } from './AnthropicChatModel';
 import { recordAgentModelMetadata } from './AgentOutputBridge';
 import {
   type ModelProvider,
@@ -152,6 +153,52 @@ function findGeminiMetadata(output: LLMResult): GeminiResponseMetadata | undefin
   return usageMetadata
     ? { usageMetadata: usageMetadata as GeminiUsageMetadata }
     : undefined;
+}
+
+function findGrounding(output: LLMResult): IDataObject | undefined {
+  const gemini = findGeminiMetadata(output);
+  if (gemini?.grounding) return gemini.grounding as unknown as IDataObject;
+
+  for (const message of findMessages(output)) {
+    augmentAnthropicMessage(message);
+    const responseMetadata = asRecord(message.response_metadata);
+    const grounding = asRecord(responseMetadata?.grounding);
+    if (grounding) return grounding as unknown as IDataObject;
+
+    const additionalKwargs = asRecord(message.additional_kwargs);
+    const additionalGrounding = asRecord(additionalKwargs?.grounding);
+    if (additionalGrounding) return additionalGrounding as unknown as IDataObject;
+  }
+
+  return undefined;
+}
+
+function findCodeExecutions(output: LLMResult): IDataObject[] | undefined {
+  const gemini = findGeminiMetadata(output);
+  if (Array.isArray(gemini?.codeExecutions) && gemini.codeExecutions.length > 0) {
+    return gemini.codeExecutions as unknown as IDataObject[];
+  }
+
+  for (const message of findMessages(output)) {
+    augmentAnthropicMessage(message);
+    const responseMetadata = asRecord(message.response_metadata);
+    if (
+      Array.isArray(responseMetadata?.codeExecutions) &&
+      responseMetadata.codeExecutions.length > 0
+    ) {
+      return responseMetadata.codeExecutions as unknown as IDataObject[];
+    }
+
+    const additionalKwargs = asRecord(message.additional_kwargs);
+    if (
+      Array.isArray(additionalKwargs?.codeExecutions) &&
+      additionalKwargs.codeExecutions.length > 0
+    ) {
+      return additionalKwargs.codeExecutions as unknown as IDataObject[];
+    }
+  }
+
+  return undefined;
 }
 
 function findNormalizedUsage(output: LLMResult): Record<string, any> | undefined {
@@ -505,6 +552,7 @@ export class UniversalChatModelTracing extends BaseCallbackHandler {
     private readonly includeIntermediateStepsInOutput = false,
     private readonly usageReporter?: ModelUsageReporter,
     failOnReporterError = false,
+    private readonly includeServerToolDetailsInOutput = true,
   ) {
     super();
     // LangChain normally logs callback failures and lets the model call
@@ -551,6 +599,9 @@ export class UniversalChatModelTracing extends BaseCallbackHandler {
       index: this.executionFunctions.getNextRunIndex(),
       prompts: [],
     };
+    for (const message of findMessages(output)) {
+      augmentAnthropicMessage(message);
+    }
     const gemini = findGeminiMetadata(output);
     const geminiMetadata = compactGeminiMetadata(gemini);
     const geminiRequests = Array.isArray(gemini?.requestDetails)
@@ -559,6 +610,8 @@ export class UniversalChatModelTracing extends BaseCallbackHandler {
     const thoughts = this.includeThoughts
       ? extractThoughtsFromResult(output)
       : [];
+    const grounding = findGrounding(output);
+    const codeExecutions = findCodeExecutions(output);
     const tokenUsage = normalizeTokenUsage(output);
     const structuredOutputs = (output.generations ?? []).flatMap(
       (generationList) =>
@@ -596,6 +649,10 @@ export class UniversalChatModelTracing extends BaseCallbackHandler {
           }
         : {}),
       ...(thoughts.length > 0 ? { thoughts: structuredClone(thoughts) as any[] } : {}),
+      ...(grounding ? { grounding: structuredClone(grounding) } : {}),
+      ...(codeExecutions && codeExecutions.length > 0
+        ? { codeExecutions: structuredClone(codeExecutions) }
+        : {}),
       ...(gemini?.usageMetadata
         ? { usageMetadata: structuredClone(gemini.usageMetadata) as IDataObject }
         : {}),
@@ -610,6 +667,11 @@ export class UniversalChatModelTracing extends BaseCallbackHandler {
       tokenUsage: structuredClone(tokenUsage),
       includeTokenUsageInAgentOutput: this.includeTokenUsageInAgentOutput,
       includeIntermediateStepsInOutput: this.includeIntermediateStepsInOutput,
+      includeServerToolDetailsInOutput: this.includeServerToolDetailsInOutput,
+      ...(grounding ? { grounding: structuredClone(grounding) } : {}),
+      ...(codeExecutions && codeExecutions.length > 0
+        ? { codeExecutions: structuredClone(codeExecutions) }
+        : {}),
       ...(structuredOutput
         ? { structuredOutput: structuredClone(structuredOutput) }
         : {}),

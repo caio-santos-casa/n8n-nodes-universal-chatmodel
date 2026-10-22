@@ -9,6 +9,10 @@ const {
   formatGeminiUsage,
 } = require('../dist/nodes/UniversalChatModel/GeminiChatModel.js');
 const {
+  AnthropicChatModel,
+  augmentAnthropicMessage,
+} = require('../dist/nodes/UniversalChatModel/AnthropicChatModel.js');
+const {
   applyModelRetry,
   getModelExecutionSettings,
   UniversalChatModel,
@@ -135,9 +139,11 @@ test('Gemini generation controls are optional collection entries', () => {
       'recoverEmptyResponses',
       'serviceTier',
       'safetySettings',
+      'serverSideTools',
       'systemMessage',
       'includeTokenUsageInAgentOutput',
       'includeIntermediateStepsInOutput',
+      'includeServerToolDetailsInOutput',
       'usageReporter',
     ],
   );
@@ -5965,6 +5971,776 @@ test('Anthropic model call retries on HTTP 529 (Overloaded Error) and normalizes
     global.fetch = originalFetch;
   }
 });
+
+test('Gemini supplyData supports legacy enableGoogleSearch property', async () => {
+  const parameters = {
+    provider: 'gemini',
+    geminiModel: 'gemini-2.5-flash',
+    geminiOptions: {
+      enableGoogleSearch: true,
+    },
+  };
+
+  const context = {
+    getNodeParameter(name, _idx, fallback) {
+      return parameters[name] ?? fallback;
+    },
+    async getCredentials() {
+      return {
+        apiKey: 'fake-gemini-key',
+      };
+    },
+    getNode() {
+      return { name: 'Universal Chat Model', parameters };
+    },
+    addInputData() {
+      return { index: 0 };
+    },
+    addOutputData() {},
+    getNextRunIndex() {
+      return 0;
+    },
+    logAiEvent() {},
+  };
+
+  const supplied = await new UniversalChatModel().supplyData.call(context, 0);
+  assert.ok(supplied.response);
+  const model = supplied.response;
+  assert.equal(model.enableGoogleSearch, true);
+});
+
+test('GeminiChatModel with enableGoogleSearch adds googleSearch tool to client and bindTools', () => {
+  const model = new GeminiChatModel({
+    apiKey: 'fake-api-key',
+    model: 'gemini-2.5-flash',
+    enableGoogleSearch: true,
+  });
+
+  assert.equal(model.enableGoogleSearch, true);
+  const clientTools = model.client?.tools;
+  assert.ok(Array.isArray(clientTools));
+  assert.ok(clientTools.some((t) => t && typeof t === 'object' && 'googleSearch' in t));
+
+  const bound = model.bindTools([{ name: 'calc', description: 'Calculator', parameters: {} }]);
+  assert.ok(bound);
+});
+
+test('Anthropic options include serverSideTools with webSearch, webSearchMaxUses and webSearchAllowedDomains', () => {
+  const description = new UniversalChatModel().description;
+  const anthropicOptions = description.properties.find(
+    (property) => property.name === 'anthropicOptions',
+  );
+  assert.ok(anthropicOptions);
+  const nested = Object.fromEntries(
+    anthropicOptions.options.map((option) => [option.name, option]),
+  );
+
+  assert.ok(nested.serverSideTools);
+  const toolValues = nested.serverSideTools.options.map((opt) => opt.value);
+  assert.ok(toolValues.includes('webSearch'));
+
+  assert.ok(nested.webSearchMaxUses);
+  assert.equal(nested.webSearchMaxUses.type, 'number');
+  assert.equal(nested.webSearchMaxUses.default, 5);
+
+  assert.ok(nested.webSearchAllowedDomains);
+  assert.equal(nested.webSearchAllowedDomains.type, 'string');
+  assert.equal(nested.webSearchAllowedDomains.default, '');
+});
+
+test('AnthropicChatModel injects web_search_20250305 tool in invocationParams with custom options', () => {
+  const model = new AnthropicChatModel(
+    {
+      apiKey: 'sk-ant-test-dummy',
+      model: 'claude-3-7-sonnet-20250219',
+    },
+    {
+      enableWebSearch: true,
+      maxUses: 7,
+      allowedDomains: ['docs.python.org', 'github.com'],
+    },
+  );
+
+  const paramsWithoutTools = model.invocationParams({});
+  assert.ok(Array.isArray(paramsWithoutTools.tools));
+  const searchTool = paramsWithoutTools.tools.find(
+    (t) => t.type === 'web_search_20250305' || t.name === 'web_search',
+  );
+  assert.ok(searchTool, 'Web search tool should be present in invocation params');
+  assert.equal(searchTool.max_uses, 7);
+  assert.deepEqual(searchTool.allowed_domains, ['docs.python.org', 'github.com']);
+
+  // Test with bindTools
+  const bound = model.bindTools([
+    {
+      name: 'get_weather',
+      description: 'Get weather',
+      input_schema: { type: 'object' },
+    },
+  ]);
+  const paramsWithTools = model.invocationParams(bound.config);
+  assert.ok(Array.isArray(paramsWithTools.tools));
+  assert.equal(paramsWithTools.tools.length, 2);
+  assert.ok(paramsWithTools.tools.some((t) => t.name === 'get_weather'));
+  assert.ok(
+    paramsWithTools.tools.some(
+      (t) => t.type === 'web_search_20250305' || t.name === 'web_search',
+    ),
+  );
+});
+
+test('Anthropic supplyData accepts creds.url as fallback for baseUrl and configures web search', async () => {
+  let createdModel;
+  const parameters = {
+    provider: 'anthropic',
+    anthropicModel: 'claude-sonnet-5-5',
+    anthropicOptions: {
+      enableWebSearch: true,
+      webSearchMaxUses: 4,
+      webSearchAllowedDomains: 'n8n.io, docs.n8n.io',
+    },
+  };
+
+  const context = {
+    getNodeParameter(name, _idx, fallback) {
+      return parameters[name] ?? fallback;
+    },
+    async getCredentials() {
+      return {
+        apiKey: 'sk-ant-test-credential',
+        url: 'https://custom-anthropic-proxy.corp.internal',
+      };
+    },
+    getNode() {
+      return { name: 'Universal Chat Model', parameters };
+    },
+    addInputData() {
+      return { index: 0 };
+    },
+    addOutputData() {},
+    getNextRunIndex() {
+      return 0;
+    },
+    logAiEvent() {},
+  };
+
+  const supplied = await new UniversalChatModel().supplyData.call(context, 0);
+  assert.ok(supplied.response);
+  const model = supplied.response;
+  assert.ok(model instanceof AnthropicChatModel);
+  assert.equal(model.clientOptions?.baseURL, 'https://custom-anthropic-proxy.corp.internal');
+  assert.equal(model.webSearchOptions?.enableWebSearch, true);
+  assert.equal(model.webSearchOptions?.maxUses, 4);
+  assert.deepEqual(model.webSearchOptions?.allowedDomains, ['n8n.io', 'docs.n8n.io']);
+});
+
+test('Gemini options include serverSideTools with googleSearch and codeExecution', () => {
+  const description = new UniversalChatModel().description;
+  const geminiOptions = description.properties.find(
+    (property) => property.name === 'geminiOptions',
+  );
+  assert.ok(geminiOptions);
+  const nested = Object.fromEntries(
+    geminiOptions.options.map((option) => [option.name, option]),
+  );
+
+  assert.ok(nested.serverSideTools);
+  assert.equal(nested.serverSideTools.type, 'multiOptions');
+  assert.deepEqual(nested.serverSideTools.default, []);
+  const toolValues = nested.serverSideTools.options.map((opt) => opt.value);
+  assert.ok(toolValues.includes('googleSearch'));
+  assert.ok(toolValues.includes('codeExecution'));
+});
+
+test('GeminiChatModel with enableCodeExecution adds codeExecution tool to client and bindTools', () => {
+  const model = new GeminiChatModel({
+    apiKey: 'fake-api-key',
+    model: 'gemini-2.5-flash',
+    enableCodeExecution: true,
+  });
+
+  assert.equal(model.enableCodeExecution, true);
+  const clientTools = model.client?.tools;
+  assert.ok(Array.isArray(clientTools));
+  assert.ok(clientTools.some((t) => t && typeof t === 'object' && 'codeExecution' in t));
+
+  const bound = model.bindTools([{ name: 'calc', description: 'Calculator', parameters: {} }]);
+  assert.ok(bound);
+});
+
+test('Gemini supplyData maps serverSideTools to enableGoogleSearch and enableCodeExecution', async () => {
+  const parameters = {
+    provider: 'gemini',
+    geminiModel: 'gemini-2.5-flash',
+    geminiOptions: {
+      serverSideTools: ['googleSearch', 'codeExecution'],
+    },
+  };
+
+  const context = {
+    getNodeParameter(name, _idx, fallback) {
+      return parameters[name] ?? fallback;
+    },
+    async getCredentials() {
+      return {
+        apiKey: 'fake-gemini-key',
+      };
+    },
+    getNode() {
+      return { name: 'Universal Chat Model', parameters };
+    },
+    addInputData() {
+      return { index: 0 };
+    },
+    addOutputData() {},
+    getNextRunIndex() {
+      return 0;
+    },
+    logAiEvent() {},
+  };
+
+  const supplied = await new UniversalChatModel().supplyData.call(context, 0);
+  assert.ok(supplied.response);
+  const model = supplied.response;
+  assert.equal(model.enableGoogleSearch, true);
+  assert.equal(model.enableCodeExecution, true);
+});
+
+test('Anthropic options include serverSideTools with webSearch, webFetch, and codeExecution', () => {
+  const description = new UniversalChatModel().description;
+  const anthropicOptions = description.properties.find(
+    (property) => property.name === 'anthropicOptions',
+  );
+  assert.ok(anthropicOptions);
+  const nested = Object.fromEntries(
+    anthropicOptions.options.map((option) => [option.name, option]),
+  );
+
+  assert.ok(nested.serverSideTools);
+  assert.equal(nested.serverSideTools.type, 'multiOptions');
+  assert.deepEqual(nested.serverSideTools.default, []);
+  const toolValues = nested.serverSideTools.options.map((opt) => opt.value);
+  assert.ok(toolValues.includes('webSearch'));
+  assert.ok(toolValues.includes('webFetch'));
+  assert.ok(toolValues.includes('codeExecution'));
+
+  assert.ok(nested.webFetchMaxUses);
+  assert.equal(nested.webFetchMaxUses.type, 'number');
+  assert.equal(nested.webFetchMaxUses.default, 5);
+});
+
+test('AnthropicChatModel injects web_fetch_20250910 and code_execution_20250825 in invocationParams', () => {
+  const model = new AnthropicChatModel(
+    {
+      apiKey: 'sk-ant-test-dummy',
+      model: 'claude-3-7-sonnet-20250219',
+    },
+    {
+      enableWebFetch: true,
+      webFetchMaxUses: 8,
+      enableCodeExecution: true,
+    },
+  );
+
+  const params = model.invocationParams({});
+  assert.ok(Array.isArray(params.tools));
+
+  const fetchTool = params.tools.find(
+    (t) => t.type === 'web_fetch_20250910' || t.name === 'web_fetch',
+  );
+  assert.ok(fetchTool, 'Web fetch tool should be present');
+  assert.equal(fetchTool.max_uses, 8);
+
+  const codeTool = params.tools.find(
+    (t) => t.type === 'code_execution_20250825' || t.name === 'code_execution',
+  );
+  assert.ok(codeTool, 'Code execution tool should be present');
+});
+
+test('Anthropic supplyData maps serverSideTools to serverToolsOptions for webFetch and codeExecution', async () => {
+  const parameters = {
+    provider: 'anthropic',
+    anthropicModel: 'claude-sonnet-5-5',
+    anthropicOptions: {
+      serverSideTools: ['webFetch', 'codeExecution'],
+      webFetchMaxUses: 6,
+    },
+  };
+
+  const context = {
+    getNodeParameter(name, _idx, fallback) {
+      return parameters[name] ?? fallback;
+    },
+    async getCredentials() {
+      return {
+        apiKey: 'sk-ant-test-credential',
+      };
+    },
+    getNode() {
+      return { name: 'Universal Chat Model', parameters };
+    },
+    addInputData() {
+      return { index: 0 };
+    },
+    addOutputData() {},
+    getNextRunIndex() {
+      return 0;
+    },
+    logAiEvent() {},
+  };
+
+  const supplied = await new UniversalChatModel().supplyData.call(context, 0);
+  assert.ok(supplied.response);
+  const model = supplied.response;
+  assert.ok(model instanceof AnthropicChatModel);
+  assert.equal(model.serverToolsOptions?.enableWebFetch, true);
+  assert.equal(model.serverToolsOptions?.webFetchMaxUses, 6);
+  assert.equal(model.serverToolsOptions?.enableCodeExecution, true);
+});
+
+test('GeminiChatModel captures groundingMetadata and codeExecution into response_metadata', async () => {
+  const originalFetch = global.fetch;
+  const mockedResponse = {
+    candidates: [
+      {
+        content: {
+          role: 'model',
+          parts: [
+            { text: 'Vou calcular a raiz.' },
+            {
+              executableCode: {
+                language: 'PYTHON',
+                code: 'import math\nprint(math.sqrt(144))',
+              },
+            },
+            {
+              codeExecutionResult: {
+                outcome: 'OUTCOME_OK',
+                output: '12.0\n',
+              },
+            },
+            { text: 'O resultado e 12.' },
+          ],
+        },
+        groundingMetadata: {
+          webSearchQueries: ['raiz quadrada de 144'],
+          groundingChunks: [
+            {
+              web: {
+                uri: 'https://pt.wikipedia.org/wiki/Raiz_quadrada',
+                title: 'Raiz quadrada - Wikipedia',
+              },
+            },
+          ],
+        },
+        finishReason: 'STOP',
+        index: 0,
+      },
+    ],
+    usageMetadata,
+    modelVersion: 'gemini-test-001',
+    responseId: 'response-grounding-test',
+  };
+
+  global.fetch = async () =>
+    new Response(JSON.stringify(mockedResponse), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+
+  try {
+    const model = new GeminiChatModel({
+      apiKey: 'fake-api-key',
+      model: 'gemini-2.5-flash',
+      enableGoogleSearch: true,
+      enableCodeExecution: true,
+    });
+
+    const result = await model.invoke([new HumanMessage('Quanto e a raiz de 144?')]);
+    assert.ok(result.response_metadata);
+    assert.ok(result.response_metadata.grounding);
+    assert.deepEqual(result.response_metadata.grounding.queries, ['raiz quadrada de 144']);
+    assert.equal(
+      result.response_metadata.grounding.sources[0].url,
+      'https://pt.wikipedia.org/wiki/Raiz_quadrada',
+    );
+    assert.equal(
+      result.response_metadata.grounding.sources[0].title,
+      'Raiz quadrada - Wikipedia',
+    );
+
+    assert.ok(result.response_metadata.codeExecutions);
+    assert.equal(result.response_metadata.codeExecutions.length, 1);
+    assert.equal(result.response_metadata.codeExecutions[0].language, 'python');
+    assert.equal(
+      result.response_metadata.codeExecutions[0].code,
+      'import math\nprint(math.sqrt(144))',
+    );
+    assert.equal(result.response_metadata.codeExecutions[0].outcome, 'OUTCOME_OK');
+    assert.equal(result.response_metadata.codeExecutions[0].output, '12.0\n');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('augmentAnthropicMessage extracts citations and codeExecutions into response_metadata', () => {
+  const fakeMessage = {
+    content: [
+      {
+        type: 'text',
+        text: 'A capital da Franca e Paris.',
+        citations: [
+          {
+            url: 'https://en.wikipedia.org/wiki/Paris',
+            title: 'Paris - Wikipedia',
+          },
+        ],
+      },
+      {
+        type: 'tool_use',
+        id: 'tu_1',
+        name: 'web_search',
+        input: { query: 'capital da Franca' },
+      },
+      {
+        type: 'tool_use',
+        id: 'tu_2',
+        name: 'code_execution',
+        input: { code: 'print("Paris")' },
+      },
+    ],
+    response_metadata: {},
+  };
+
+  augmentAnthropicMessage(fakeMessage);
+
+  assert.ok(fakeMessage.response_metadata.grounding);
+  assert.deepEqual(fakeMessage.response_metadata.grounding.queries, ['capital da Franca']);
+  assert.equal(
+    fakeMessage.response_metadata.grounding.sources[0].url,
+    'https://en.wikipedia.org/wiki/Paris',
+  );
+  assert.equal(
+    fakeMessage.response_metadata.grounding.sources[0].title,
+    'Paris - Wikipedia',
+  );
+
+  assert.ok(fakeMessage.response_metadata.codeExecutions);
+  assert.equal(fakeMessage.response_metadata.codeExecutions[0].code, 'print("Paris")');
+});
+
+test('AI Agent output receives grounding and codeExecutions from model metadata', async () => {
+  const fixture = join(
+    __dirname,
+    'fixtures',
+    'n8n-nodes-langchain',
+    'dist',
+    'nodes',
+    'agents',
+    'Agent',
+    'V2',
+    'AgentV2.node.cjs',
+  );
+  const { AgentV2 } = require(fixture);
+  installAgentOutputBridge();
+
+  const agent = new AgentV2();
+  agent.run = async () => {
+    recordAgentModelMetadata({
+      grounding: {
+        queries: ['pesquisa de teste'],
+        sources: [{ title: 'Fonte A', url: 'https://example.com' }],
+      },
+      codeExecutions: [
+        { language: 'python', code: 'print(123)', outcome: 'OUTCOME_OK', output: '123\n' },
+      ],
+    });
+    return [[{ json: { output: 'Resposta final' } }]];
+  };
+
+  const result = await agent.execute();
+  const output = result[0][0].json;
+  assert.equal(output.output, 'Resposta final');
+  assert.ok(output.grounding);
+  assert.deepEqual(output.grounding.queries, ['pesquisa de teste']);
+  assert.equal(output.grounding.sources[0].url, 'https://example.com');
+  assert.ok(output.codeExecutions);
+  assert.equal(output.codeExecutions[0].code, 'print(123)');
+  assert.equal(output.codeExecutions[0].output, '123\n');
+});
+
+test('AI Agent output omits grounding and codeExecutions when includeServerToolDetailsInOutput is false', async () => {
+  const fixture = join(
+    __dirname,
+    'fixtures',
+    'n8n-nodes-langchain',
+    'dist',
+    'nodes',
+    'agents',
+    'Agent',
+    'V2',
+    'AgentV2.node.cjs',
+  );
+  const { AgentV2 } = require(fixture);
+  installAgentOutputBridge();
+
+  const agent = new AgentV2();
+  agent.run = async () => {
+    recordAgentModelMetadata({
+      includeServerToolDetailsInOutput: false,
+      grounding: {
+        queries: ['pesquisa oculta'],
+        sources: [{ title: 'Fonte Oculta', url: 'https://hidden.example.com' }],
+      },
+      codeExecutions: [
+        { language: 'python', code: 'print("hidden")', outcome: 'OUTCOME_OK', output: 'hidden\n' },
+      ],
+    });
+    return [[{ json: { output: 'Resposta sem detalhes' } }]];
+  };
+
+  const result = await agent.execute();
+  const output = result[0][0].json;
+  assert.equal(output.output, 'Resposta sem detalhes');
+  assert.equal(output.grounding, undefined);
+  assert.equal(output.codeExecutions, undefined);
+});
+
+test('sanitizeUndefinedTextLeakage removes leaked undefined tokens from citations', () => {
+  const { sanitizeUndefinedTextLeakage } = require('../dist/nodes/UniversalChatModel/AgentOutputBridge.js');
+
+  const input =
+    '- **Jornal Cidade**: undefinedMunicípio registra mínima de 14,4°C.\n' +
+    '- **Previsão Agora**: undefinedmedição às 18:45 de 18°.\n' +
+    '- **HG Brasil**: undefinedatualizado em 14 de outubro.\n' +
+    'undefinedTexto no início.\n' +
+    'Texto com undefined como palavra solta no meio.\n' +
+    'if (variavel === undefined) return;';
+
+  const output = sanitizeUndefinedTextLeakage(input);
+
+  assert.equal(
+    output,
+    '- **Jornal Cidade**: Município registra mínima de 14,4°C.\n' +
+      '- **Previsão Agora**: medição às 18:45 de 18°.\n' +
+      '- **HG Brasil**: atualizado em 14 de outubro.\n' +
+      'Texto no início.\n' +
+      'Texto com undefined como palavra solta no meio.\n' +
+      'if (variavel === undefined) return;',
+  );
+});
+
+test('augmentAnthropicMessage parses JSON string inputs and web_search_tool_result', () => {
+  const fakeMessage = {
+    content: [
+      {
+        type: 'server_tool_use',
+        name: 'web_search',
+        input: '{"query": "temperatura rio claro"}',
+      },
+      {
+        type: 'web_search_tool_result',
+        content: [
+          { url: 'https://jornalcidade.net', title: 'Jornal Cidade' },
+          { uri: 'https://previsaoagora.com.br', title: 'Previsao Agora' },
+        ],
+      },
+      {
+        type: 'text',
+        text: 'Previsão encontrada:',
+        citations: [
+          {
+            type: 'web_search_result_location',
+            url: 'https://hgbrasil.com',
+            title: 'HG Brasil',
+          },
+        ],
+      },
+      {
+        type: 'server_tool_use',
+        name: 'code_execution',
+        input: '{"code": "print(20.2)"}',
+      },
+    ],
+    response_metadata: {},
+  };
+
+  augmentAnthropicMessage(fakeMessage);
+
+  assert.ok(fakeMessage.response_metadata.grounding);
+  assert.deepEqual(fakeMessage.response_metadata.grounding.queries, ['temperatura rio claro']);
+  assert.equal(fakeMessage.response_metadata.grounding.sources.length, 3);
+  const urls = fakeMessage.response_metadata.grounding.sources.map((s) => s.url);
+  assert.ok(urls.includes('https://hgbrasil.com'));
+  assert.ok(urls.includes('https://jornalcidade.net'));
+  assert.ok(urls.includes('https://previsaoagora.com.br'));
+
+  assert.ok(fakeMessage.response_metadata.codeExecutions);
+  assert.equal(fakeMessage.response_metadata.codeExecutions[0].code, 'print(20.2)');
+});
+
+test('AnthropicChatModel _streamResponseChunks sanitizes citation blocks and extracts grounding in streaming', async () => {
+  const model = new AnthropicChatModel(
+    { anthropicApiKey: 'fake-key', model: 'claude-3-5-haiku-20241022' },
+    { enableWebSearch: true, enableCodeExecution: true },
+  );
+
+  // Mock createStreamWithRetry to return SSE events
+  model.createStreamWithRetry = async function* () {
+    yield {
+      type: 'message_start',
+      message: { id: 'msg_1', usage: { input_tokens: 100, output_tokens: 10 } },
+    };
+    yield {
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'server_tool_use', id: 'stu_1', name: 'web_search' },
+    };
+    yield {
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'input_json_delta', partial_json: '{"query": "tempo hoje"}' },
+    };
+    yield {
+      type: 'content_block_start',
+      index: 1,
+      content_block: {
+        type: 'web_search_tool_result',
+        content: [{ url: 'https://tempo.com', title: 'Tempo Hoje' }],
+      },
+    };
+    yield {
+      type: 'content_block_start',
+      index: 2,
+      content_block: { type: 'text', text: 'Hoje faz 25°C' },
+    };
+    yield {
+      type: 'content_block_delta',
+      index: 2,
+      delta: {
+        type: 'citations_delta',
+        citation: { type: 'web_search_result_location', url: 'https://tempo.com', title: 'Tempo Hoje' },
+      },
+    };
+    yield {
+      type: 'message_delta',
+      usage: { output_tokens: 20 },
+      delta: {},
+    };
+  };
+
+  const chunks = [];
+  for await (const chunk of model._streamResponseChunks([new HumanMessage('Tempo?')], {})) {
+    chunks.push(chunk);
+  }
+
+  assert.ok(chunks.length > 0);
+
+  // Check that no text block has undefined text
+  for (const chunk of chunks) {
+    if (Array.isArray(chunk.message?.content)) {
+      for (const block of chunk.message.content) {
+        if (block.type === 'text') {
+          assert.notEqual(block.text, undefined);
+        }
+      }
+    }
+  }
+
+  // Check that the last chunk has grounding
+  const lastChunk = chunks[chunks.length - 1];
+  assert.ok(lastChunk.message.response_metadata.grounding);
+  assert.deepEqual(lastChunk.message.response_metadata.grounding.queries, ['tempo hoje']);
+  assert.equal(lastChunk.message.response_metadata.grounding.sources[0].url, 'https://tempo.com');
+});
+
+test('GeminiChatModel adds includeServerSideToolInvocations to toolConfig when mixing built-in tools and function declarations', () => {
+  const model = new GeminiChatModel({
+    apiKey: 'fake-api-key',
+    model: 'gemini-2.5-flash',
+    enableGoogleSearch: true,
+    enableCodeExecution: true,
+  });
+
+  const customTool = {
+    functionDeclarations: [
+      {
+        name: 'get_weather',
+        description: 'Get weather for city',
+        parameters: {
+          type: 'object',
+          properties: { city: { type: 'string' } },
+          required: ['city'],
+        },
+      },
+    ],
+  };
+
+  const bound = model.bindTools([customTool]);
+  const invocationParams = model.invocationParams(bound.config);
+
+  assert.ok(invocationParams.toolConfig);
+  assert.equal(invocationParams.toolConfig.includeServerSideToolInvocations, true);
+  assert.ok(invocationParams.tools.some((t) => t && 'googleSearch' in t));
+  assert.ok(invocationParams.tools.some((t) => t && 'codeExecution' in t));
+  assert.ok(invocationParams.tools.some((t) => t && 'functionDeclarations' in t));
+});
+
+test('GeminiChatModel generateContentStream sends includeServerSideToolInvocations in request payload when function declarations exist', async () => {
+  let capturedRequest;
+  const originalFetch = global.fetch;
+  global.fetch = async (url, init) => {
+    capturedRequest = JSON.parse(init.body);
+    return new Response(
+      'data: ' +
+        JSON.stringify({
+          candidates: [
+            {
+              content: { role: 'model', parts: [{ text: 'Resposta teste' }] },
+              finishReason: 'STOP',
+              index: 0,
+            },
+          ],
+          usageMetadata,
+        }) +
+        '\n\n',
+      { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+    );
+  };
+
+  try {
+    const model = new GeminiChatModel({
+      apiKey: 'fake-api-key',
+      model: 'gemini-2.5-flash',
+      enableGoogleSearch: true,
+    });
+
+    const customTool = {
+      functionDeclarations: [
+        {
+          name: 'lookup_user',
+          description: 'Look up user',
+          parameters: { type: 'object', properties: { id: { type: 'string' } } },
+        },
+      ],
+    };
+
+    const bound = model.bindTools([customTool]);
+    const stream = await bound.stream([new HumanMessage('Busque usuario 1')]);
+    for await (const chunk of stream) {
+      // consume stream
+    }
+
+    assert.ok(capturedRequest);
+    assert.ok(capturedRequest.tools.some((t) => t && 'googleSearch' in t));
+    assert.ok(capturedRequest.tools.some((t) => t && 'functionDeclarations' in t));
+    assert.ok(capturedRequest.toolConfig);
+    assert.equal(capturedRequest.toolConfig.includeServerSideToolInvocations, true);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 
 
 
