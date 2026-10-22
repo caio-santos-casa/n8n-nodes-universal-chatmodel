@@ -498,6 +498,38 @@ function jsonSnapshot<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function ensureServerSideToolConfig(
+  target: Record<string, any>,
+  currentTools: unknown[],
+  fallbackToolConfig?: unknown,
+): void {
+  const hasServerSideTool = currentTools.some(
+    (t: any) => t && typeof t === 'object' && ('googleSearch' in t || 'codeExecution' in t),
+  );
+  const hasFunctionDeclarations = currentTools.some(
+    (t: any) =>
+      t &&
+      typeof t === 'object' &&
+      (Array.isArray(t.functionDeclarations) || 'functionDeclarations' in t),
+  );
+
+  if (hasServerSideTool && hasFunctionDeclarations) {
+    const existing =
+      (target.toolConfig && typeof target.toolConfig === 'object'
+        ? (target.toolConfig as Record<string, unknown>)
+        : undefined) ??
+      (fallbackToolConfig && typeof fallbackToolConfig === 'object'
+        ? (fallbackToolConfig as Record<string, unknown>)
+        : undefined) ??
+      {};
+
+    target.toolConfig = {
+      ...existing,
+      includeServerSideToolInvocations: true,
+    };
+  }
+}
+
 function effectiveRequest(client: any, params: unknown): Record<string, unknown> {
   const request = asRecord(params) ?? {};
   // The Google SDK merges model defaults with the per-call request before
@@ -1181,6 +1213,7 @@ export class GeminiChatModel extends ChatGoogleGenerativeAI {
         clientTools.push({ codeExecution: {} });
       }
       client.tools = clientTools;
+      ensureServerSideToolConfig(client, clientTools);
     }
 
     const client = (this as any).client;
@@ -1218,6 +1251,7 @@ export class GeminiChatModel extends ChatGoogleGenerativeAI {
               }
             }
             req.tools = currentTools;
+            ensureServerSideToolConfig(req, currentTools, client?.toolConfig);
           }
         }
         const context = responseCapture.getStore();
@@ -1284,6 +1318,7 @@ export class GeminiChatModel extends ChatGoogleGenerativeAI {
               }
             }
             req.tools = currentTools;
+            ensureServerSideToolConfig(req, currentTools, client?.toolConfig);
           }
         }
         const context = responseCapture.getStore();
@@ -1374,8 +1409,31 @@ export class GeminiChatModel extends ChatGoogleGenerativeAI {
       }
     }
 
+    const currentTools = Array.isArray(params.tools)
+      ? [...params.tools]
+      : (Array.isArray((this as any).client?.tools) ? [...(this as any).client.tools] : []);
+
+    if (this.enableGoogleSearch) {
+      if (!currentTools.some((t: any) => t && typeof t === 'object' && 'googleSearch' in t)) {
+        currentTools.push({ googleSearch: {} });
+      }
+    }
+    if (this.enableCodeExecution) {
+      if (!currentTools.some((t: any) => t && typeof t === 'object' && 'codeExecution' in t)) {
+        currentTools.push({ codeExecution: {} });
+      }
+    }
+
+    const toolConfigHolder: Record<string, any> = {};
+    if (params.toolConfig) {
+      toolConfigHolder.toolConfig = params.toolConfig;
+    }
+    ensureServerSideToolConfig(toolConfigHolder, currentTools, (this as any).client?.toolConfig);
+
     return {
       ...params,
+      ...(currentTools.length > 0 ? { tools: currentTools } : {}),
+      ...(toolConfigHolder.toolConfig ? { toolConfig: toolConfigHolder.toolConfig } : {}),
       ...(this.serviceTier ? { service_tier: this.serviceTier } : {}),
       ...(generationConfig
         ? { generationConfig: { ...generationConfig } }
@@ -1586,6 +1644,21 @@ export class GeminiChatModel extends ChatGoogleGenerativeAI {
         combined.push({ codeExecution: {} });
       }
     }
-    return super.bindTools(combined, kwargs);
+    const boundKwargs = { ...(kwargs || {}) };
+    const hasServerSideTool = combined.some(
+      (t: any) => t && typeof t === 'object' && ('googleSearch' in t || 'codeExecution' in t),
+    );
+    const hasOtherTools = combined.some(
+      (t: any) => t && typeof t === 'object' && !('googleSearch' in t) && !('codeExecution' in t),
+    );
+
+    if (hasServerSideTool && hasOtherTools) {
+      boundKwargs.toolConfig = {
+        ...(boundKwargs.toolConfig || {}),
+        includeServerSideToolInvocations: true,
+      };
+    }
+
+    return super.bindTools(combined, boundKwargs);
   }
 }

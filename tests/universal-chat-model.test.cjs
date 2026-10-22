@@ -6654,6 +6654,93 @@ test('AnthropicChatModel _streamResponseChunks sanitizes citation blocks and ext
   assert.equal(lastChunk.message.response_metadata.grounding.sources[0].url, 'https://tempo.com');
 });
 
+test('GeminiChatModel adds includeServerSideToolInvocations to toolConfig when mixing built-in tools and function declarations', () => {
+  const model = new GeminiChatModel({
+    apiKey: 'fake-api-key',
+    model: 'gemini-2.5-flash',
+    enableGoogleSearch: true,
+    enableCodeExecution: true,
+  });
+
+  const customTool = {
+    functionDeclarations: [
+      {
+        name: 'get_weather',
+        description: 'Get weather for city',
+        parameters: {
+          type: 'object',
+          properties: { city: { type: 'string' } },
+          required: ['city'],
+        },
+      },
+    ],
+  };
+
+  const bound = model.bindTools([customTool]);
+  const invocationParams = model.invocationParams(bound.config);
+
+  assert.ok(invocationParams.toolConfig);
+  assert.equal(invocationParams.toolConfig.includeServerSideToolInvocations, true);
+  assert.ok(invocationParams.tools.some((t) => t && 'googleSearch' in t));
+  assert.ok(invocationParams.tools.some((t) => t && 'codeExecution' in t));
+  assert.ok(invocationParams.tools.some((t) => t && 'functionDeclarations' in t));
+});
+
+test('GeminiChatModel generateContentStream sends includeServerSideToolInvocations in request payload when function declarations exist', async () => {
+  let capturedRequest;
+  const originalFetch = global.fetch;
+  global.fetch = async (url, init) => {
+    capturedRequest = JSON.parse(init.body);
+    return new Response(
+      'data: ' +
+        JSON.stringify({
+          candidates: [
+            {
+              content: { role: 'model', parts: [{ text: 'Resposta teste' }] },
+              finishReason: 'STOP',
+              index: 0,
+            },
+          ],
+          usageMetadata,
+        }) +
+        '\n\n',
+      { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+    );
+  };
+
+  try {
+    const model = new GeminiChatModel({
+      apiKey: 'fake-api-key',
+      model: 'gemini-2.5-flash',
+      enableGoogleSearch: true,
+    });
+
+    const customTool = {
+      functionDeclarations: [
+        {
+          name: 'lookup_user',
+          description: 'Look up user',
+          parameters: { type: 'object', properties: { id: { type: 'string' } } },
+        },
+      ],
+    };
+
+    const bound = model.bindTools([customTool]);
+    const stream = await bound.stream([new HumanMessage('Busque usuario 1')]);
+    for await (const chunk of stream) {
+      // consume stream
+    }
+
+    assert.ok(capturedRequest);
+    assert.ok(capturedRequest.tools.some((t) => t && 'googleSearch' in t));
+    assert.ok(capturedRequest.tools.some((t) => t && 'functionDeclarations' in t));
+    assert.ok(capturedRequest.toolConfig);
+    assert.equal(capturedRequest.toolConfig.includeServerSideToolInvocations, true);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 
 
 
