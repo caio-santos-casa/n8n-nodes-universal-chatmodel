@@ -23,6 +23,27 @@ export interface GeminiUsageMetadata {
   [key: string]: unknown;
 }
 
+export interface GeminiGroundingSource {
+  title?: string;
+  url?: string;
+}
+
+export interface GeminiGroundingMetadata {
+  queries?: string[];
+  sources?: GeminiGroundingSource[];
+  supports?: unknown[];
+  searchEntryPoint?: unknown;
+  [key: string]: unknown;
+}
+
+export interface GeminiCodeExecution {
+  language?: string;
+  code?: string;
+  outcome?: string;
+  output?: string;
+  [key: string]: unknown;
+}
+
 export interface GeminiResponseMetadata {
   usageMetadata?: GeminiUsageMetadata;
   modelVersion?: string;
@@ -31,6 +52,8 @@ export interface GeminiResponseMetadata {
   promptFeedback?: unknown;
   thoughts?: unknown[];
   functionCalls?: unknown[];
+  grounding?: GeminiGroundingMetadata;
+  codeExecutions?: GeminiCodeExecution[];
   serviceTier?: string;
   requestDetails?: GeminiRequestDetail[];
   [key: string]: unknown;
@@ -52,6 +75,8 @@ interface CaptureContext {
   hasFunctionCall: boolean;
   hasNonThoughtOutput: boolean;
   functionCalls: unknown[];
+  grounding?: GeminiGroundingMetadata;
+  codeExecutions: GeminiCodeExecution[];
   providerRequestMs: number;
   metadataCaptureMs: number;
   adapterTotalMs: number;
@@ -203,6 +228,111 @@ function mergeUniqueFunctionCalls(existing: unknown, incoming: unknown[]): unkno
   });
 }
 
+function extractGroundingFromCandidate(
+  candidate: Record<string, unknown>,
+): GeminiGroundingMetadata | undefined {
+  const raw =
+    asRecord(candidate.groundingMetadata) ??
+    asRecord(candidate.grounding_metadata);
+  if (!raw) return undefined;
+
+  const rawQueries = Array.isArray(raw.webSearchQueries)
+    ? raw.webSearchQueries
+    : Array.isArray(raw.web_search_queries)
+      ? raw.web_search_queries
+      : [];
+  const queries = rawQueries.filter(
+    (q): q is string => typeof q === 'string' && q.trim().length > 0,
+  );
+
+  const rawChunks = Array.isArray(raw.groundingChunks)
+    ? raw.groundingChunks
+    : Array.isArray(raw.grounding_chunks)
+      ? raw.grounding_chunks
+      : [];
+  const sources: GeminiGroundingSource[] = [];
+  for (const chunkValue of rawChunks) {
+    const chunk = asRecord(chunkValue);
+    const web = asRecord(chunk?.web);
+    const url =
+      typeof web?.uri === 'string'
+        ? web.uri
+        : typeof web?.url === 'string'
+          ? web.url
+          : undefined;
+    const title = typeof web?.title === 'string' ? web.title : undefined;
+    if (url || title) {
+      sources.push({
+        ...(title ? { title } : {}),
+        ...(url ? { url } : {}),
+      });
+    }
+  }
+
+  const supports = Array.isArray(raw.groundingSupports)
+    ? raw.groundingSupports
+    : Array.isArray(raw.grounding_supports)
+      ? raw.grounding_supports
+      : undefined;
+
+  const searchEntryPoint = raw.searchEntryPoint ?? raw.search_entry_point;
+
+  if (queries.length === 0 && sources.length === 0 && !supports && !searchEntryPoint) {
+    return undefined;
+  }
+
+  return {
+    ...(queries.length > 0 ? { queries } : {}),
+    ...(sources.length > 0 ? { sources } : {}),
+    ...(supports ? { supports: structuredClone(supports) } : {}),
+    ...(searchEntryPoint ? { searchEntryPoint: structuredClone(searchEntryPoint) } : {}),
+  };
+}
+
+function mergeGroundingMetadata(
+  existing?: GeminiGroundingMetadata,
+  incoming?: GeminiGroundingMetadata,
+): GeminiGroundingMetadata | undefined {
+  if (!existing) return incoming ? structuredClone(incoming) : undefined;
+  if (!incoming) return structuredClone(existing);
+
+  const queries = [
+    ...new Set([...(existing.queries ?? []), ...(incoming.queries ?? [])]),
+  ];
+  const seenUrls = new Set<string>();
+  const sources: GeminiGroundingSource[] = [];
+  for (const src of [...(existing.sources ?? []), ...(incoming.sources ?? [])]) {
+    const key = src.url ?? src.title ?? '';
+    if (key && seenUrls.has(key)) continue;
+    if (key) seenUrls.add(key);
+    sources.push(structuredClone(src));
+  }
+  const supports = [
+    ...(Array.isArray(existing.supports) ? existing.supports : []),
+    ...(Array.isArray(incoming.supports) ? incoming.supports : []),
+  ];
+
+  return {
+    ...(queries.length > 0 ? { queries } : {}),
+    ...(sources.length > 0 ? { sources } : {}),
+    ...(supports.length > 0 ? { supports } : {}),
+    ...(incoming.searchEntryPoint ?? existing.searchEntryPoint
+      ? { searchEntryPoint: incoming.searchEntryPoint ?? existing.searchEntryPoint }
+      : {}),
+  };
+}
+
+function mergeCodeExecutions(
+  existing?: GeminiCodeExecution[],
+  incoming?: GeminiCodeExecution[],
+): GeminiCodeExecution[] | undefined {
+  const merged = [
+    ...(Array.isArray(existing) ? existing : []),
+    ...(Array.isArray(incoming) ? incoming : []),
+  ];
+  return merged.length > 0 ? structuredClone(merged) : undefined;
+}
+
 function capturePayload(payload: unknown, defaultServiceTier?: string): void {
   if (!payload || typeof payload !== 'object') return;
 
@@ -220,18 +350,28 @@ function capturePayload(payload: unknown, defaultServiceTier?: string): void {
   const candidates = Array.isArray(source.candidates) ? source.candidates : [];
   for (const candidateValue of candidates) {
     const candidate = asRecord(candidateValue);
-    if (typeof candidate?.finishReason === 'string') {
+    if (!candidate) continue;
+
+    if (typeof candidate.finishReason === 'string') {
       context.finishReasons.push(candidate.finishReason);
     }
-    if (typeof candidate?.finishMessage === 'string') {
+    if (typeof candidate.finishMessage === 'string') {
       context.finishMessages.push(candidate.finishMessage);
     }
 
-    const content = asRecord(candidate?.content);
+    const grounding = extractGroundingFromCandidate(candidate);
+    if (grounding) {
+      context.grounding = mergeGroundingMetadata(context.grounding, grounding);
+    }
+
+    const content = asRecord(candidate.content);
     const parts = Array.isArray(content?.parts) ? content.parts : [];
+    let currentCodeExec: GeminiCodeExecution | undefined;
+
     for (const partValue of parts) {
       const part = asRecord(partValue);
       if (!part) continue;
+
       const functionCall =
         asRecord(part.functionCall) ?? asRecord(part.function_call);
       if (functionCall) {
@@ -243,6 +383,47 @@ function capturePayload(payload: unknown, defaultServiceTier?: string): void {
         });
         continue;
       }
+
+      const executableCode =
+        asRecord(part.executableCode) ?? asRecord(part.executable_code);
+      if (executableCode) {
+        context.hasNonThoughtOutput = true;
+        const code =
+          typeof executableCode.code === 'string'
+            ? executableCode.code
+            : undefined;
+        const language =
+          typeof executableCode.language === 'string'
+            ? executableCode.language.toLowerCase()
+            : 'python';
+        currentCodeExec = { language, code };
+        context.codeExecutions.push(currentCodeExec);
+      }
+
+      const codeExecutionResult =
+        asRecord(part.codeExecutionResult) ?? asRecord(part.code_execution_result);
+      if (codeExecutionResult) {
+        context.hasNonThoughtOutput = true;
+        const outcome =
+          typeof codeExecutionResult.outcome === 'string'
+            ? codeExecutionResult.outcome
+            : undefined;
+        const output =
+          typeof codeExecutionResult.output === 'string'
+            ? codeExecutionResult.output
+            : undefined;
+        if (currentCodeExec) {
+          if (outcome) currentCodeExec.outcome = outcome;
+          if (output !== undefined) currentCodeExec.output = output;
+        } else {
+          context.codeExecutions.push({
+            language: 'python',
+            outcome,
+            output,
+          });
+        }
+      }
+
       if (isThoughtBlock(part)) continue;
       if (typeof part.text === 'string') {
         if (part.text.trim().length > 0) context.hasNonThoughtOutput = true;
@@ -291,6 +472,10 @@ function capturePayload(payload: unknown, defaultServiceTier?: string): void {
           ),
         }
       : {}),
+    ...(context.grounding ? { grounding: structuredClone(context.grounding) } : {}),
+    ...(context.codeExecutions.length > 0
+      ? { codeExecutions: structuredClone(context.codeExecutions) }
+      : {}),
   };
 }
 
@@ -302,6 +487,7 @@ function createCaptureContext(): CaptureContext {
     hasFunctionCall: false,
     hasNonThoughtOutput: false,
     functionCalls: [],
+    codeExecutions: [],
     providerRequestMs: 0,
     metadataCaptureMs: 0,
     adapterTotalMs: 0,
@@ -685,6 +871,15 @@ function mergeResponseMetadata(
     ),
   );
   const usageMetadata = mergeUsageMetadata(responses);
+  const grounding = contexts.reduce<GeminiGroundingMetadata | undefined>(
+    (acc, ctx) => mergeGroundingMetadata(acc, ctx.response?.grounding ?? ctx.grounding),
+    undefined,
+  );
+  const codeExecutions = contexts.reduce<GeminiCodeExecution[] | undefined>(
+    (acc, ctx) =>
+      mergeCodeExecutions(acc, ctx.response?.codeExecutions ?? ctx.codeExecutions),
+    undefined,
+  );
   const providerRequestMs = contexts.reduce(
     (total, context) => total + context.providerRequestMs,
     0,
@@ -709,6 +904,8 @@ function mergeResponseMetadata(
       : {}),
     ...(thoughts.length > 0 ? { thoughts } : {}),
     ...(functionCalls.length > 0 ? { functionCalls } : {}),
+    ...(grounding ? { grounding } : {}),
+    ...(codeExecutions && codeExecutions.length > 0 ? { codeExecutions } : {}),
     ...(adapterTotalMs > 0
       ? {
           clientTiming: {
@@ -846,6 +1043,10 @@ function augmentMessage(
   message.response_metadata = {
     ...message.response_metadata,
     gemini,
+    ...(response.grounding ? { grounding: structuredClone(response.grounding) } : {}),
+    ...(response.codeExecutions && response.codeExecutions.length > 0
+      ? { codeExecutions: structuredClone(response.codeExecutions) }
+      : {}),
   };
   message.additional_kwargs = {
     ...message.additional_kwargs,

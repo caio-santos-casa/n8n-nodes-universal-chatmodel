@@ -10,6 +10,7 @@ const {
 } = require('../dist/nodes/UniversalChatModel/GeminiChatModel.js');
 const {
   AnthropicChatModel,
+  augmentAnthropicMessage,
 } = require('../dist/nodes/UniversalChatModel/AnthropicChatModel.js');
 const {
   applyModelRetry,
@@ -143,6 +144,7 @@ test('Gemini generation controls are optional collection entries', () => {
       'systemMessage',
       'includeTokenUsageInAgentOutput',
       'includeIntermediateStepsInOutput',
+      'includeServerToolDetailsInOutput',
       'usageReporter',
     ],
   );
@@ -6273,6 +6275,214 @@ test('Anthropic supplyData maps serverSideTools to serverToolsOptions for webFet
   assert.equal(model.serverToolsOptions?.enableWebFetch, true);
   assert.equal(model.serverToolsOptions?.webFetchMaxUses, 6);
   assert.equal(model.serverToolsOptions?.enableCodeExecution, true);
+});
+
+test('GeminiChatModel captures groundingMetadata and codeExecution into response_metadata', async () => {
+  const originalFetch = global.fetch;
+  const mockedResponse = {
+    candidates: [
+      {
+        content: {
+          role: 'model',
+          parts: [
+            { text: 'Vou calcular a raiz.' },
+            {
+              executableCode: {
+                language: 'PYTHON',
+                code: 'import math\nprint(math.sqrt(144))',
+              },
+            },
+            {
+              codeExecutionResult: {
+                outcome: 'OUTCOME_OK',
+                output: '12.0\n',
+              },
+            },
+            { text: 'O resultado e 12.' },
+          ],
+        },
+        groundingMetadata: {
+          webSearchQueries: ['raiz quadrada de 144'],
+          groundingChunks: [
+            {
+              web: {
+                uri: 'https://pt.wikipedia.org/wiki/Raiz_quadrada',
+                title: 'Raiz quadrada - Wikipedia',
+              },
+            },
+          ],
+        },
+        finishReason: 'STOP',
+        index: 0,
+      },
+    ],
+    usageMetadata,
+    modelVersion: 'gemini-test-001',
+    responseId: 'response-grounding-test',
+  };
+
+  global.fetch = async () =>
+    new Response(JSON.stringify(mockedResponse), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+
+  try {
+    const model = new GeminiChatModel({
+      apiKey: 'fake-api-key',
+      model: 'gemini-2.5-flash',
+      enableGoogleSearch: true,
+      enableCodeExecution: true,
+    });
+
+    const result = await model.invoke([new HumanMessage('Quanto e a raiz de 144?')]);
+    assert.ok(result.response_metadata);
+    assert.ok(result.response_metadata.grounding);
+    assert.deepEqual(result.response_metadata.grounding.queries, ['raiz quadrada de 144']);
+    assert.equal(
+      result.response_metadata.grounding.sources[0].url,
+      'https://pt.wikipedia.org/wiki/Raiz_quadrada',
+    );
+    assert.equal(
+      result.response_metadata.grounding.sources[0].title,
+      'Raiz quadrada - Wikipedia',
+    );
+
+    assert.ok(result.response_metadata.codeExecutions);
+    assert.equal(result.response_metadata.codeExecutions.length, 1);
+    assert.equal(result.response_metadata.codeExecutions[0].language, 'python');
+    assert.equal(
+      result.response_metadata.codeExecutions[0].code,
+      'import math\nprint(math.sqrt(144))',
+    );
+    assert.equal(result.response_metadata.codeExecutions[0].outcome, 'OUTCOME_OK');
+    assert.equal(result.response_metadata.codeExecutions[0].output, '12.0\n');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('augmentAnthropicMessage extracts citations and codeExecutions into response_metadata', () => {
+  const fakeMessage = {
+    content: [
+      {
+        type: 'text',
+        text: 'A capital da Franca e Paris.',
+        citations: [
+          {
+            url: 'https://en.wikipedia.org/wiki/Paris',
+            title: 'Paris - Wikipedia',
+          },
+        ],
+      },
+      {
+        type: 'tool_use',
+        id: 'tu_1',
+        name: 'web_search',
+        input: { query: 'capital da Franca' },
+      },
+      {
+        type: 'tool_use',
+        id: 'tu_2',
+        name: 'code_execution',
+        input: { code: 'print("Paris")' },
+      },
+    ],
+    response_metadata: {},
+  };
+
+  augmentAnthropicMessage(fakeMessage);
+
+  assert.ok(fakeMessage.response_metadata.grounding);
+  assert.deepEqual(fakeMessage.response_metadata.grounding.queries, ['capital da Franca']);
+  assert.equal(
+    fakeMessage.response_metadata.grounding.sources[0].url,
+    'https://en.wikipedia.org/wiki/Paris',
+  );
+  assert.equal(
+    fakeMessage.response_metadata.grounding.sources[0].title,
+    'Paris - Wikipedia',
+  );
+
+  assert.ok(fakeMessage.response_metadata.codeExecutions);
+  assert.equal(fakeMessage.response_metadata.codeExecutions[0].code, 'print("Paris")');
+});
+
+test('AI Agent output receives grounding and codeExecutions from model metadata', async () => {
+  const fixture = join(
+    __dirname,
+    'fixtures',
+    'n8n-nodes-langchain',
+    'dist',
+    'nodes',
+    'agents',
+    'Agent',
+    'V2',
+    'AgentV2.node.cjs',
+  );
+  const { AgentV2 } = require(fixture);
+  installAgentOutputBridge();
+
+  const agent = new AgentV2();
+  agent.run = async () => {
+    recordAgentModelMetadata({
+      grounding: {
+        queries: ['pesquisa de teste'],
+        sources: [{ title: 'Fonte A', url: 'https://example.com' }],
+      },
+      codeExecutions: [
+        { language: 'python', code: 'print(123)', outcome: 'OUTCOME_OK', output: '123\n' },
+      ],
+    });
+    return [[{ json: { output: 'Resposta final' } }]];
+  };
+
+  const result = await agent.execute();
+  const output = result[0][0].json;
+  assert.equal(output.output, 'Resposta final');
+  assert.ok(output.grounding);
+  assert.deepEqual(output.grounding.queries, ['pesquisa de teste']);
+  assert.equal(output.grounding.sources[0].url, 'https://example.com');
+  assert.ok(output.codeExecutions);
+  assert.equal(output.codeExecutions[0].code, 'print(123)');
+  assert.equal(output.codeExecutions[0].output, '123\n');
+});
+
+test('AI Agent output omits grounding and codeExecutions when includeServerToolDetailsInOutput is false', async () => {
+  const fixture = join(
+    __dirname,
+    'fixtures',
+    'n8n-nodes-langchain',
+    'dist',
+    'nodes',
+    'agents',
+    'Agent',
+    'V2',
+    'AgentV2.node.cjs',
+  );
+  const { AgentV2 } = require(fixture);
+  installAgentOutputBridge();
+
+  const agent = new AgentV2();
+  agent.run = async () => {
+    recordAgentModelMetadata({
+      includeServerToolDetailsInOutput: false,
+      grounding: {
+        queries: ['pesquisa oculta'],
+        sources: [{ title: 'Fonte Oculta', url: 'https://hidden.example.com' }],
+      },
+      codeExecutions: [
+        { language: 'python', code: 'print("hidden")', outcome: 'OUTCOME_OK', output: 'hidden\n' },
+      ],
+    });
+    return [[{ json: { output: 'Resposta sem detalhes' } }]];
+  };
+
+  const result = await agent.execute();
+  const output = result[0][0].json;
+  assert.equal(output.output, 'Resposta sem detalhes');
+  assert.equal(output.grounding, undefined);
+  assert.equal(output.codeExecutions, undefined);
 });
 
 

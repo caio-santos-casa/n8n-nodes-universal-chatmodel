@@ -12,6 +12,9 @@ export interface AgentModelCallMetadata {
   tokenUsage?: IDataObject;
   includeTokenUsageInAgentOutput?: boolean;
   includeIntermediateStepsInOutput?: boolean;
+  includeServerToolDetailsInOutput?: boolean;
+  grounding?: IDataObject;
+  codeExecutions?: IDataObject[];
   usageMetadata?: IDataObject;
   gemini?: IDataObject;
   geminiRequests?: IDataObject[];
@@ -145,6 +148,76 @@ function aggregateTokenUsage(calls: AgentModelCallMetadata[]): IDataObject {
   return aggregate;
 }
 
+function mergeGrounding(calls: AgentModelCallMetadata[]): IDataObject | undefined {
+  const allQueries: string[] = [];
+  const allSources: IDataObject[] = [];
+  const seenUrls = new Set<string>();
+  let lastSearchEntryPoint: unknown;
+  const allSupports: unknown[] = [];
+
+  for (const call of calls) {
+    const grounding = call.grounding;
+    if (!grounding || typeof grounding !== 'object') continue;
+
+    if (Array.isArray(grounding.queries)) {
+      for (const q of grounding.queries) {
+        if (typeof q === 'string' && q.trim()) allQueries.push(q.trim());
+      }
+    }
+    if (Array.isArray(grounding.sources)) {
+      for (const src of grounding.sources) {
+        const srcRec = asRecord(src);
+        if (!srcRec) continue;
+        const key =
+          typeof srcRec.url === 'string'
+            ? srcRec.url
+            : typeof srcRec.title === 'string'
+              ? srcRec.title
+              : '';
+        if (key && seenUrls.has(key)) continue;
+        if (key) seenUrls.add(key);
+        allSources.push(cloneValue(srcRec));
+      }
+    }
+    if (Array.isArray(grounding.supports)) {
+      allSupports.push(...grounding.supports);
+    }
+    if (grounding.searchEntryPoint) {
+      lastSearchEntryPoint = grounding.searchEntryPoint;
+    }
+  }
+
+  const uniqueQueries = [...new Set(allQueries)];
+  if (
+    uniqueQueries.length === 0 &&
+    allSources.length === 0 &&
+    allSupports.length === 0 &&
+    !lastSearchEntryPoint
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...(uniqueQueries.length > 0 ? { queries: uniqueQueries } : {}),
+    ...(allSources.length > 0 ? { sources: allSources } : {}),
+    ...(allSupports.length > 0 ? { supports: cloneValue(allSupports) } : {}),
+    ...(lastSearchEntryPoint ? { searchEntryPoint: cloneValue(lastSearchEntryPoint) } : {}),
+  };
+}
+
+function mergeCodeExecutions(calls: AgentModelCallMetadata[]): IDataObject[] | undefined {
+  const executions: IDataObject[] = [];
+  for (const call of calls) {
+    if (Array.isArray(call.codeExecutions)) {
+      for (const exec of call.codeExecutions) {
+        const execRec = asRecord(exec);
+        if (execRec) executions.push(cloneValue(execRec));
+      }
+    }
+  }
+  return executions.length > 0 ? executions : undefined;
+}
+
 function buildAgentOutputMetadata(
   calls: AgentModelCallMetadata[],
 ): IDataObject | undefined {
@@ -152,6 +225,14 @@ function buildAgentOutputMetadata(
 
   const thoughts = mergeThoughts(calls);
   const lastCall = calls[calls.length - 1];
+  const exposeServerToolDetails =
+    lastCall?.includeServerToolDetailsInOutput !== false;
+
+  const grounding = exposeServerToolDetails ? mergeGrounding(calls) : undefined;
+  const codeExecutions = exposeServerToolDetails
+    ? mergeCodeExecutions(calls)
+    : undefined;
+
   const callsWithVisibleUsage = calls.filter(
     (call) => call.includeTokenUsageInAgentOutput === true,
   );
@@ -171,13 +252,22 @@ function buildAgentOutputMetadata(
   // tracing remain complete. Public Agent output, however, must stay clean
   // unless the corresponding visibility option was explicitly enabled.
   const exposeUsage = callsWithVisibleUsage.length > 0;
-  if (thoughts.length === 0 && !exposeUsage) return undefined;
+  const hasServerToolDetails = Boolean(
+    grounding || (codeExecutions && codeExecutions.length > 0),
+  );
+  if (thoughts.length === 0 && !exposeUsage && !hasServerToolDetails) return undefined;
 
   const modelResponses = exposeUsage
     ? calls.map((call, index) => ({
         call: index + 1,
         ...(call.thoughts?.length
           ? { thoughts: cloneValue(call.thoughts) }
+          : {}),
+        ...(exposeServerToolDetails && call.grounding
+          ? { grounding: cloneValue(call.grounding) }
+          : {}),
+        ...(exposeServerToolDetails && call.codeExecutions?.length
+          ? { codeExecutions: cloneValue(call.codeExecutions) }
           : {}),
         ...(call.includeTokenUsageInAgentOutput === true && call.tokenUsage
           ? { tokenUsage: cloneValue(call.tokenUsage) }
@@ -196,6 +286,10 @@ function buildAgentOutputMetadata(
 
   return {
     ...(thoughts.length > 0 ? { thoughts: cloneValue(thoughts) as any[] } : {}),
+    ...(grounding ? { grounding: cloneValue(grounding) } : {}),
+    ...(codeExecutions && codeExecutions.length > 0
+      ? { codeExecutions: cloneValue(codeExecutions) }
+      : {}),
     ...(callsWithVisibleUsage.length > 0
       ? { tokenUsage: aggregateTokenUsage(callsWithVisibleUsage) }
       : {}),

@@ -49,6 +49,7 @@ interface UsageReportingOptions {
   systemMessage?: string;
   includeTokenUsageInAgentOutput?: boolean;
   includeIntermediateStepsInOutput?: boolean;
+  includeServerToolDetailsInOutput?: boolean;
   enableUsageReporter?: boolean;
   nodeLabel?: string;
   inputTextMode?: 'label' | 'prompt';
@@ -259,6 +260,14 @@ function sharedModelOptions(): INodeProperties[] {
         'Whether compatible agent outputs include a compact list of tool steps. Internal LangChain messages and Gemini signatures are always removed.',
     },
     {
+      displayName: 'Include Server-Side Tool Details in Output',
+      name: 'includeServerToolDetailsInOutput',
+      type: 'boolean',
+      default: true,
+      description:
+        'Whether compatible parent-node outputs include structured grounding and codeExecutions fields for native server-side tools.',
+    },
+    {
       displayName: 'Usage Reporter',
       name: 'usageReporter',
       type: 'fixedCollection',
@@ -419,6 +428,11 @@ function resolveSharedModelOptions(
       (typeof legacy.includeIntermediateStepsInOutput === 'boolean'
         ? legacy.includeIntermediateStepsInOutput
         : false),
+    includeServerToolDetailsInOutput:
+      providerOptions.includeServerToolDetailsInOutput ??
+      (typeof legacy.includeServerToolDetailsInOutput === 'boolean'
+        ? legacy.includeServerToolDetailsInOutput
+        : true),
     enableUsageReporter:
       groupedReporting.enabled ??
       providerOptions.enableUsageReporter ??
@@ -1865,6 +1879,7 @@ export class UniversalChatModel implements INodeType {
           sharedOptions.includeIntermediateStepsInOutput === true,
           usageReporter,
           sharedOptions.failOnReporterError === true,
+          sharedOptions.includeServerToolDetailsInOutput !== false,
         ),
       ];
 
@@ -1988,6 +2003,7 @@ export class UniversalChatModel implements INodeType {
           sharedOptions.includeIntermediateStepsInOutput === true,
           usageReporter,
           sharedOptions.failOnReporterError === true,
+          sharedOptions.includeServerToolDetailsInOutput !== false,
         ),
       ];
 
@@ -2104,6 +2120,7 @@ export class UniversalChatModel implements INodeType {
           sharedOptions.includeIntermediateStepsInOutput === true,
           usageReporter,
           sharedOptions.failOnReporterError === true,
+          sharedOptions.includeServerToolDetailsInOutput !== false,
         ),
       ];
 

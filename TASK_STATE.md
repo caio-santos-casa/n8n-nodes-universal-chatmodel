@@ -1,14 +1,13 @@
-# Task State: Native Server-Side Tools (Gemini & Anthropic)
+# Task State: Server-Side Tool Details in Agent Output (Option 1)
 
 ## Objetivo
-Agrupar ferramentas nativas de nuvem em "Server-side Tools" (multiOptions) permitindo ao usuário selecionar quais ativar:
-- Gemini: Google Search Grounding (`googleSearch`) e Python Code Execution (`codeExecution`).
-- Anthropic: Web Search (`webSearch`), Web Fetch (`webFetch`), Code Execution (`codeExecution`).
+Expor detalhes estruturados de pesquisas na web (queries, fontes e citações) e execução de código Python (script e resultado) diretamente no JSON de saída do AI Agent (`grounding` e `codeExecutions`).
 
 ## Status do Progresso
-- [x] Passo 1: Implementação inicial de Web Search e correção de credencial (branch `feat/native-web-search`).
-- [x] Passo 2: Atualizar `geminiOptions` e `anthropicOptions` em `UniversalChatModel.node.ts` com campo `serverSideTools` (multiOptions) e opções detalhadas de configuração.
-- [x] Passo 3: Atualizar `GeminiChatModel.ts` para suportar `codeExecution` e `googleSearch`.
-- [x] Passo 4: Atualizar `AnthropicChatModel.ts` para suportar `web_search_20250305`, `web_fetch_20250910` e `code_execution_20250825`.
-- [x] Passo 5: Atualizar testes unitários em `tests/universal-chat-model.test.cjs` cobrindo o seletor `serverSideTools` e as novas ferramentas.
-- [x] Passo 6: Validação final única com `npm test` e `npm run verify:package`.
+- [x] Passo 1: Atualizar `GeminiChatModel.ts` para capturar `groundingMetadata` e `codeExecution` dos candidatos e parts.
+- [x] Passo 2: Atualizar `AnthropicChatModel.ts` para capturar tool uses e resultados de `web_search`, `web_fetch` e `code_execution`.
+- [x] Passo 3: Atualizar `UniversalChatModelTracing.ts` para extrair e encaminhar `grounding` e `codeExecutions`.
+- [x] Passo 4: Atualizar `AgentOutputBridge.ts` para mesclar e anexar `grounding` e `codeExecutions` no JSON final do AI Agent.
+- [x] Passo 5: Atualizar `UniversalChatModel.node.ts` adicionando `includeServerToolDetailsInOutput` em `sharedModelOptions` e passando para o tracing.
+- [x] Passo 6: Atualizar testes em `tests/universal-chat-model.test.cjs` cobrindo extração, mesclagem e bridge.
+- [x] Passo 7: Validação final única com `npm test` e `npm run verify:package`.
