@@ -929,6 +929,7 @@ export class GeminiChatModel extends ChatGoogleGenerativeAI {
   private readonly recoverEmptyResponses: boolean;
   private readonly requestTimeoutMs: number;
   private readonly serviceTier?: string;
+  readonly enableGoogleSearch: boolean;
 
   constructor(fields: Record<string, unknown>, onUsage?: (metadata: GeminiUsageMetadata) => void) {
     super({
@@ -936,6 +937,7 @@ export class GeminiChatModel extends ChatGoogleGenerativeAI {
       model: String(fields.model ?? ''),
     } as any);
     this.onUsage = onUsage;
+    this.enableGoogleSearch = fields.enableGoogleSearch === true;
     this.serviceTier =
       typeof fields.serviceTier === 'string' && fields.serviceTier.trim().length > 0
         ? fields.serviceTier.trim()
@@ -966,6 +968,15 @@ export class GeminiChatModel extends ChatGoogleGenerativeAI {
       delete (this as any).client.generationConfig.serviceTier;
     }
 
+    if (this.enableGoogleSearch && (this as any).client) {
+      const client = (this as any).client;
+      const clientTools = Array.isArray(client.tools) ? [...client.tools] : [];
+      if (!clientTools.some((t: any) => t && typeof t === 'object' && 'googleSearch' in t)) {
+        clientTools.push({ googleSearch: {} });
+        client.tools = clientTools;
+      }
+    }
+
     const client = (this as any).client;
     if (client && typeof client.generateContent === 'function') {
       const generateContent = client.generateContent.bind(client);
@@ -979,6 +990,18 @@ export class GeminiChatModel extends ChatGoogleGenerativeAI {
           if (req.generationConfig && typeof req.generationConfig === 'object') {
             delete (req.generationConfig as any).service_tier;
             delete (req.generationConfig as any).serviceTier;
+          }
+          if (this.enableGoogleSearch) {
+            const currentTools = Array.isArray(req.tools)
+              ? [...req.tools]
+              : (Array.isArray(client?.tools) ? [...client.tools] : []);
+            const hasGoogleSearch = currentTools.some(
+              (t: any) => t && typeof t === 'object' && 'googleSearch' in t,
+            );
+            if (!hasGoogleSearch) {
+              currentTools.push({ googleSearch: {} });
+            }
+            req.tools = currentTools;
           }
         }
         const context = responseCapture.getStore();
@@ -1023,6 +1046,18 @@ export class GeminiChatModel extends ChatGoogleGenerativeAI {
           if (req.generationConfig && typeof req.generationConfig === 'object') {
             delete (req.generationConfig as any).service_tier;
             delete (req.generationConfig as any).serviceTier;
+          }
+          if (this.enableGoogleSearch) {
+            const currentTools = Array.isArray(req.tools)
+              ? [...req.tools]
+              : (Array.isArray(client?.tools) ? [...client.tools] : []);
+            const hasGoogleSearch = currentTools.some(
+              (t: any) => t && typeof t === 'object' && 'googleSearch' in t,
+            );
+            if (!hasGoogleSearch) {
+              currentTools.push({ googleSearch: {} });
+            }
+            req.tools = currentTools;
           }
         }
         const context = responseCapture.getStore();
@@ -1305,5 +1340,18 @@ export class GeminiChatModel extends ChatGoogleGenerativeAI {
     }
     if (response?.usageMetadata) this.onUsage?.(response.usageMetadata);
     for (const chunk of recoveryChunks) yield chunk;
+  }
+
+  override bindTools(tools: any[], kwargs?: any): any {
+    const combined = [...(tools || [])];
+    if (this.enableGoogleSearch) {
+      const hasGoogleSearch = combined.some(
+        (t: any) => t && typeof t === 'object' && 'googleSearch' in t,
+      );
+      if (!hasGoogleSearch) {
+        combined.push({ googleSearch: {} });
+      }
+    }
+    return super.bindTools(combined, kwargs);
   }
 }

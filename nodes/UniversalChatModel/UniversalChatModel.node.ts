@@ -12,7 +12,7 @@ import {
 } from 'n8n-workflow';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, parse } from 'node:path';
-import { ChatAnthropic } from '@langchain/anthropic';
+import { AnthropicChatModel } from './AnthropicChatModel';
 import { ChatOpenAI } from '@langchain/openai';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import {
@@ -1263,6 +1263,14 @@ export class UniversalChatModel implements INodeType {
               },
             ],
           },
+          {
+            displayName: 'Enable Google Search Grounding',
+            name: 'enableGoogleSearch',
+            type: 'boolean',
+            default: false,
+            description:
+              'Allow Gemini to perform real-time Google searches to ground its responses with up-to-date web information and citations.',
+          },
           ...sharedModelOptions(),
         ],
       },
@@ -1354,6 +1362,42 @@ export class UniversalChatModel implements INodeType {
             default: '',
             placeholder: 'https://api.anthropic.com',
             description: 'Override API base URL for proxies or custom enterprise gateways',
+          },
+          {
+            displayName: 'Enable Web Search',
+            name: 'enableWebSearch',
+            type: 'boolean',
+            default: false,
+            description:
+              'Enable native Anthropic Web Search tool to allow Claude to autonomously search the web and ground answers with source citations.',
+          },
+          {
+            displayName: 'Web Search Max Uses',
+            name: 'webSearchMaxUses',
+            type: 'number',
+            typeOptions: { minValue: 1, maxValue: 20 },
+            default: 5,
+            displayOptions: {
+              show: {
+                enableWebSearch: [true],
+              },
+            },
+            description:
+              'Maximum number of web searches Claude can execute per request (1 to 20).',
+          },
+          {
+            displayName: 'Web Search Allowed Domains',
+            name: 'webSearchAllowedDomains',
+            type: 'string',
+            default: '',
+            placeholder: 'docs.python.org, github.com',
+            displayOptions: {
+              show: {
+                enableWebSearch: [true],
+              },
+            },
+            description:
+              'Optional comma-separated list of domains to restrict web search queries to (e.g. "docs.python.org, github.com").',
           },
           ...sharedModelOptions(),
         ],
@@ -1642,6 +1686,7 @@ export class UniversalChatModel implements INodeType {
         recoverEmptyResponses?: boolean;
         safetySettings?: { values?: Array<{ category: string; threshold: string }> };
         serviceTier?: string;
+        enableGoogleSearch?: boolean;
       };
 
       // Preserve values from workflows created with the pre-collection UI.
@@ -1739,6 +1784,7 @@ export class UniversalChatModel implements INodeType {
         recoverEmptyResponses: opts.recoverEmptyResponses !== false,
         requestTimeoutMs: opts.requestTimeoutMs ?? 60_000,
         includeRequestDetailsInOutput: opts.includeRequestDetailsInOutput === true,
+        enableGoogleSearch: opts.enableGoogleSearch === true,
       };
       const usageReporter = await createUsageReporter(
         this,
@@ -1790,7 +1836,9 @@ export class UniversalChatModel implements INodeType {
         throw new Error('Anthropic API Key is required. Configure the Anthropic API credential.');
       }
       let credBaseUrl =
-        creds && typeof creds.baseUrl === 'string' ? creds.baseUrl.trim() : '';
+        creds && (typeof creds.url === 'string' || typeof creds.baseUrl === 'string')
+          ? String(creds.url || creds.baseUrl).trim()
+          : '';
 
       // Resolve model
       let anthropicModel = this.getNodeParameter('anthropicModel', executionItemIndex, 'claude-sonnet-5-5') as string;
@@ -1806,6 +1854,9 @@ export class UniversalChatModel implements INodeType {
         thinking?: boolean;
         thinkingBudget?: number;
         baseUrl?: string;
+        enableWebSearch?: boolean;
+        webSearchMaxUses?: number;
+        webSearchAllowedDomains?: string;
       };
       const sharedOptions = resolveSharedModelOptions(this, opts);
 
@@ -1875,7 +1926,25 @@ export class UniversalChatModel implements INodeType {
         ),
       ];
 
-      let model: BaseChatModel = new ChatAnthropic(modelOptions);
+      const allowedDomains =
+        typeof opts.webSearchAllowedDomains === 'string' &&
+        opts.webSearchAllowedDomains.trim().length > 0
+          ? opts.webSearchAllowedDomains
+              .split(',')
+              .map((d) => d.trim())
+              .filter((d) => d.length > 0)
+          : undefined;
+
+      const webSearchOptions =
+        opts.enableWebSearch === true
+          ? {
+              enableWebSearch: true,
+              maxUses: opts.webSearchMaxUses ?? 5,
+              allowedDomains,
+            }
+          : undefined;
+
+      let model: BaseChatModel = new AnthropicChatModel(modelOptions, webSearchOptions);
       model = applySystemMessage(model, sharedOptions.systemMessage ?? '');
 
       return {

@@ -56,7 +56,6 @@
     ],
     "credentials": [
       "dist/credentials/GoogleGeminiApi.credentials.js",
-      "dist/credentials/AnthropicApi.credentials.js",
       "dist/credentials/OpenAiCompatibleApi.credentials.js"
     ]
   },

@@ -9,6 +9,9 @@ const {
   formatGeminiUsage,
 } = require('../dist/nodes/UniversalChatModel/GeminiChatModel.js');
 const {
+  AnthropicChatModel,
+} = require('../dist/nodes/UniversalChatModel/AnthropicChatModel.js');
+const {
   applyModelRetry,
   getModelExecutionSettings,
   UniversalChatModel,
@@ -135,6 +138,7 @@ test('Gemini generation controls are optional collection entries', () => {
       'recoverEmptyResponses',
       'serviceTier',
       'safetySettings',
+      'enableGoogleSearch',
       'systemMessage',
       'includeTokenUsageInAgentOutput',
       'includeIntermediateStepsInOutput',
@@ -5965,6 +5969,147 @@ test('Anthropic model call retries on HTTP 529 (Overloaded Error) and normalizes
     global.fetch = originalFetch;
   }
 });
+
+test('Gemini options include enableGoogleSearch grounding property', () => {
+  const description = new UniversalChatModel().description;
+  const geminiOptions = description.properties.find(
+    (property) => property.name === 'geminiOptions',
+  );
+  assert.ok(geminiOptions);
+  const nested = Object.fromEntries(
+    geminiOptions.options.map((option) => [option.name, option]),
+  );
+
+  assert.ok(nested.enableGoogleSearch);
+  assert.equal(nested.enableGoogleSearch.type, 'boolean');
+  assert.equal(nested.enableGoogleSearch.default, false);
+});
+
+test('GeminiChatModel with enableGoogleSearch adds googleSearch tool to client and bindTools', () => {
+  const model = new GeminiChatModel({
+    apiKey: 'fake-api-key',
+    model: 'gemini-2.5-flash',
+    enableGoogleSearch: true,
+  });
+
+  assert.equal(model.enableGoogleSearch, true);
+  const clientTools = model.client?.tools;
+  assert.ok(Array.isArray(clientTools));
+  assert.ok(clientTools.some((t) => t && typeof t === 'object' && 'googleSearch' in t));
+
+  const bound = model.bindTools([{ name: 'calc', description: 'Calculator', parameters: {} }]);
+  assert.ok(bound);
+});
+
+test('Anthropic options include enableWebSearch, webSearchMaxUses and webSearchAllowedDomains', () => {
+  const description = new UniversalChatModel().description;
+  const anthropicOptions = description.properties.find(
+    (property) => property.name === 'anthropicOptions',
+  );
+  assert.ok(anthropicOptions);
+  const nested = Object.fromEntries(
+    anthropicOptions.options.map((option) => [option.name, option]),
+  );
+
+  assert.ok(nested.enableWebSearch);
+  assert.equal(nested.enableWebSearch.type, 'boolean');
+  assert.equal(nested.enableWebSearch.default, false);
+
+  assert.ok(nested.webSearchMaxUses);
+  assert.equal(nested.webSearchMaxUses.type, 'number');
+  assert.equal(nested.webSearchMaxUses.default, 5);
+
+  assert.ok(nested.webSearchAllowedDomains);
+  assert.equal(nested.webSearchAllowedDomains.type, 'string');
+  assert.equal(nested.webSearchAllowedDomains.default, '');
+});
+
+test('AnthropicChatModel injects web_search_20250305 tool in invocationParams with custom options', () => {
+  const model = new AnthropicChatModel(
+    {
+      apiKey: 'sk-ant-test-dummy',
+      model: 'claude-3-7-sonnet-20250219',
+    },
+    {
+      enableWebSearch: true,
+      maxUses: 7,
+      allowedDomains: ['docs.python.org', 'github.com'],
+    },
+  );
+
+  const paramsWithoutTools = model.invocationParams({});
+  assert.ok(Array.isArray(paramsWithoutTools.tools));
+  const searchTool = paramsWithoutTools.tools.find(
+    (t) => t.type === 'web_search_20250305' || t.name === 'web_search',
+  );
+  assert.ok(searchTool, 'Web search tool should be present in invocation params');
+  assert.equal(searchTool.max_uses, 7);
+  assert.deepEqual(searchTool.allowed_domains, ['docs.python.org', 'github.com']);
+
+  // Test with bindTools
+  const bound = model.bindTools([
+    {
+      name: 'get_weather',
+      description: 'Get weather',
+      input_schema: { type: 'object' },
+    },
+  ]);
+  const paramsWithTools = model.invocationParams(bound.config);
+  assert.ok(Array.isArray(paramsWithTools.tools));
+  assert.equal(paramsWithTools.tools.length, 2);
+  assert.ok(paramsWithTools.tools.some((t) => t.name === 'get_weather'));
+  assert.ok(
+    paramsWithTools.tools.some(
+      (t) => t.type === 'web_search_20250305' || t.name === 'web_search',
+    ),
+  );
+});
+
+test('Anthropic supplyData accepts creds.url as fallback for baseUrl and configures web search', async () => {
+  let createdModel;
+  const parameters = {
+    provider: 'anthropic',
+    anthropicModel: 'claude-sonnet-5-5',
+    anthropicOptions: {
+      enableWebSearch: true,
+      webSearchMaxUses: 4,
+      webSearchAllowedDomains: 'n8n.io, docs.n8n.io',
+    },
+  };
+
+  const context = {
+    getNodeParameter(name, _idx, fallback) {
+      return parameters[name] ?? fallback;
+    },
+    async getCredentials() {
+      return {
+        apiKey: 'sk-ant-test-credential',
+        url: 'https://custom-anthropic-proxy.corp.internal',
+      };
+    },
+    getNode() {
+      return { name: 'Universal Chat Model', parameters };
+    },
+    addInputData() {
+      return { index: 0 };
+    },
+    addOutputData() {},
+    getNextRunIndex() {
+      return 0;
+    },
+    logAiEvent() {},
+  };
+
+  const supplied = await new UniversalChatModel().supplyData.call(context, 0);
+  assert.ok(supplied.response);
+  const model = supplied.response;
+  assert.ok(model instanceof AnthropicChatModel);
+  assert.equal(model.clientOptions?.baseURL, 'https://custom-anthropic-proxy.corp.internal');
+  assert.equal(model.webSearchOptions?.enableWebSearch, true);
+  assert.equal(model.webSearchOptions?.maxUses, 4);
+  assert.deepEqual(model.webSearchOptions?.allowedDomains, ['n8n.io', 'docs.n8n.io']);
+});
+
 
 
 
