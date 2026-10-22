@@ -1264,6 +1264,25 @@ export class UniversalChatModel implements INodeType {
             ],
           },
           {
+            displayName: 'Server-Side Tools',
+            name: 'serverSideTools',
+            type: 'multiOptions',
+            options: [
+              {
+                name: 'Google Search Grounding',
+                value: 'googleSearch',
+                description: 'Real-time Google search grounding with live web information and citations',
+              },
+              {
+                name: 'Python Code Execution',
+                value: 'codeExecution',
+                description: 'Sandboxed Python code execution directly on Google infrastructure',
+              },
+            ],
+            default: [],
+            description: 'Native tools executed directly on Google servers during model generation',
+          },
+          {
             displayName: 'Enable Google Search Grounding',
             name: 'enableGoogleSearch',
             type: 'boolean',
@@ -1364,12 +1383,28 @@ export class UniversalChatModel implements INodeType {
             description: 'Override API base URL for proxies or custom enterprise gateways',
           },
           {
-            displayName: 'Enable Web Search',
-            name: 'enableWebSearch',
-            type: 'boolean',
-            default: false,
-            description:
-              'Enable native Anthropic Web Search tool to allow Claude to autonomously search the web and ground answers with source citations.',
+            displayName: 'Server-Side Tools',
+            name: 'serverSideTools',
+            type: 'multiOptions',
+            options: [
+              {
+                name: 'Web Search',
+                value: 'webSearch',
+                description: 'Allow Claude to autonomously search the web for up-to-date information and citations',
+              },
+              {
+                name: 'Web Fetch',
+                value: 'webFetch',
+                description: 'Allow Claude to fetch and parse content from web URLs and PDFs directly',
+              },
+              {
+                name: 'Python Code Execution',
+                value: 'codeExecution',
+                description: 'Allow Claude to write and run Python code in a secure sandboxed environment',
+              },
+            ],
+            default: [],
+            description: 'Native server-side tools executed directly by Anthropic servers during inference',
           },
           {
             displayName: 'Web Search Max Uses',
@@ -1379,7 +1414,7 @@ export class UniversalChatModel implements INodeType {
             default: 5,
             displayOptions: {
               show: {
-                enableWebSearch: [true],
+                serverSideTools: ['webSearch'],
               },
             },
             description:
@@ -1393,11 +1428,33 @@ export class UniversalChatModel implements INodeType {
             placeholder: 'docs.python.org, github.com',
             displayOptions: {
               show: {
-                enableWebSearch: [true],
+                serverSideTools: ['webSearch'],
               },
             },
             description:
               'Optional comma-separated list of domains to restrict web search queries to (e.g. "docs.python.org, github.com").',
+          },
+          {
+            displayName: 'Web Fetch Max Uses',
+            name: 'webFetchMaxUses',
+            type: 'number',
+            typeOptions: { minValue: 1, maxValue: 20 },
+            default: 5,
+            displayOptions: {
+              show: {
+                serverSideTools: ['webFetch'],
+              },
+            },
+            description:
+              'Maximum number of web pages or documents Claude can fetch per request (1 to 20).',
+          },
+          {
+            displayName: 'Enable Web Search',
+            name: 'enableWebSearch',
+            type: 'boolean',
+            default: false,
+            description:
+              'Enable native Anthropic Web Search tool to allow Claude to autonomously search the web and ground answers with source citations.',
           },
           ...sharedModelOptions(),
         ],
@@ -1686,6 +1743,7 @@ export class UniversalChatModel implements INodeType {
         recoverEmptyResponses?: boolean;
         safetySettings?: { values?: Array<{ category: string; threshold: string }> };
         serviceTier?: string;
+        serverSideTools?: string[];
         enableGoogleSearch?: boolean;
       };
 
@@ -1777,6 +1835,10 @@ export class UniversalChatModel implements INodeType {
         }
       }
 
+      const geminiServerTools = Array.isArray(opts.serverSideTools) ? opts.serverSideTools : [];
+      const enableGoogleSearch = opts.enableGoogleSearch === true || geminiServerTools.includes('googleSearch');
+      const enableCodeExecution = geminiServerTools.includes('codeExecution');
+
       const modelInput: any = {
         apiKey: geminiApiKey,
         model: geminiModel,
@@ -1784,7 +1846,8 @@ export class UniversalChatModel implements INodeType {
         recoverEmptyResponses: opts.recoverEmptyResponses !== false,
         requestTimeoutMs: opts.requestTimeoutMs ?? 60_000,
         includeRequestDetailsInOutput: opts.includeRequestDetailsInOutput === true,
-        enableGoogleSearch: opts.enableGoogleSearch === true,
+        enableGoogleSearch,
+        enableCodeExecution,
       };
       const usageReporter = await createUsageReporter(
         this,
@@ -1854,9 +1917,11 @@ export class UniversalChatModel implements INodeType {
         thinking?: boolean;
         thinkingBudget?: number;
         baseUrl?: string;
+        serverSideTools?: string[];
         enableWebSearch?: boolean;
         webSearchMaxUses?: number;
         webSearchAllowedDomains?: string;
+        webFetchMaxUses?: number;
       };
       const sharedOptions = resolveSharedModelOptions(this, opts);
 
@@ -1926,6 +1991,11 @@ export class UniversalChatModel implements INodeType {
         ),
       ];
 
+      const anthropicServerTools = Array.isArray(opts.serverSideTools) ? opts.serverSideTools : [];
+      const enableWebSearch = opts.enableWebSearch === true || anthropicServerTools.includes('webSearch');
+      const enableWebFetch = anthropicServerTools.includes('webFetch');
+      const enableCodeExecution = anthropicServerTools.includes('codeExecution');
+
       const allowedDomains =
         typeof opts.webSearchAllowedDomains === 'string' &&
         opts.webSearchAllowedDomains.trim().length > 0
@@ -1935,16 +2005,19 @@ export class UniversalChatModel implements INodeType {
               .filter((d) => d.length > 0)
           : undefined;
 
-      const webSearchOptions =
-        opts.enableWebSearch === true
+      const serverToolsOptions =
+        enableWebSearch || enableWebFetch || enableCodeExecution
           ? {
-              enableWebSearch: true,
-              maxUses: opts.webSearchMaxUses ?? 5,
-              allowedDomains,
+              enableWebSearch,
+              webSearchMaxUses: opts.webSearchMaxUses ?? 5,
+              webSearchAllowedDomains: allowedDomains,
+              enableWebFetch,
+              webFetchMaxUses: opts.webFetchMaxUses ?? 5,
+              enableCodeExecution,
             }
           : undefined;
 
-      let model: BaseChatModel = new AnthropicChatModel(modelOptions, webSearchOptions);
+      let model: BaseChatModel = new AnthropicChatModel(modelOptions, serverToolsOptions);
       model = applySystemMessage(model, sharedOptions.systemMessage ?? '');
 
       return {

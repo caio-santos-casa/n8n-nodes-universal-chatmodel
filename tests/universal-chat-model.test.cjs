@@ -138,6 +138,7 @@ test('Gemini generation controls are optional collection entries', () => {
       'recoverEmptyResponses',
       'serviceTier',
       'safetySettings',
+      'serverSideTools',
       'enableGoogleSearch',
       'systemMessage',
       'includeTokenUsageInAgentOutput',
@@ -6108,6 +6109,170 @@ test('Anthropic supplyData accepts creds.url as fallback for baseUrl and configu
   assert.equal(model.webSearchOptions?.enableWebSearch, true);
   assert.equal(model.webSearchOptions?.maxUses, 4);
   assert.deepEqual(model.webSearchOptions?.allowedDomains, ['n8n.io', 'docs.n8n.io']);
+});
+
+test('Gemini options include serverSideTools with googleSearch and codeExecution', () => {
+  const description = new UniversalChatModel().description;
+  const geminiOptions = description.properties.find(
+    (property) => property.name === 'geminiOptions',
+  );
+  assert.ok(geminiOptions);
+  const nested = Object.fromEntries(
+    geminiOptions.options.map((option) => [option.name, option]),
+  );
+
+  assert.ok(nested.serverSideTools);
+  assert.equal(nested.serverSideTools.type, 'multiOptions');
+  assert.deepEqual(nested.serverSideTools.default, []);
+  const toolValues = nested.serverSideTools.options.map((opt) => opt.value);
+  assert.ok(toolValues.includes('googleSearch'));
+  assert.ok(toolValues.includes('codeExecution'));
+});
+
+test('GeminiChatModel with enableCodeExecution adds codeExecution tool to client and bindTools', () => {
+  const model = new GeminiChatModel({
+    apiKey: 'fake-api-key',
+    model: 'gemini-2.5-flash',
+    enableCodeExecution: true,
+  });
+
+  assert.equal(model.enableCodeExecution, true);
+  const clientTools = model.client?.tools;
+  assert.ok(Array.isArray(clientTools));
+  assert.ok(clientTools.some((t) => t && typeof t === 'object' && 'codeExecution' in t));
+
+  const bound = model.bindTools([{ name: 'calc', description: 'Calculator', parameters: {} }]);
+  assert.ok(bound);
+});
+
+test('Gemini supplyData maps serverSideTools to enableGoogleSearch and enableCodeExecution', async () => {
+  const parameters = {
+    provider: 'gemini',
+    geminiModel: 'gemini-2.5-flash',
+    geminiOptions: {
+      serverSideTools: ['googleSearch', 'codeExecution'],
+    },
+  };
+
+  const context = {
+    getNodeParameter(name, _idx, fallback) {
+      return parameters[name] ?? fallback;
+    },
+    async getCredentials() {
+      return {
+        apiKey: 'fake-gemini-key',
+      };
+    },
+    getNode() {
+      return { name: 'Universal Chat Model', parameters };
+    },
+    addInputData() {
+      return { index: 0 };
+    },
+    addOutputData() {},
+    getNextRunIndex() {
+      return 0;
+    },
+    logAiEvent() {},
+  };
+
+  const supplied = await new UniversalChatModel().supplyData.call(context, 0);
+  assert.ok(supplied.response);
+  const model = supplied.response;
+  assert.equal(model.enableGoogleSearch, true);
+  assert.equal(model.enableCodeExecution, true);
+});
+
+test('Anthropic options include serverSideTools with webSearch, webFetch, and codeExecution', () => {
+  const description = new UniversalChatModel().description;
+  const anthropicOptions = description.properties.find(
+    (property) => property.name === 'anthropicOptions',
+  );
+  assert.ok(anthropicOptions);
+  const nested = Object.fromEntries(
+    anthropicOptions.options.map((option) => [option.name, option]),
+  );
+
+  assert.ok(nested.serverSideTools);
+  assert.equal(nested.serverSideTools.type, 'multiOptions');
+  assert.deepEqual(nested.serverSideTools.default, []);
+  const toolValues = nested.serverSideTools.options.map((opt) => opt.value);
+  assert.ok(toolValues.includes('webSearch'));
+  assert.ok(toolValues.includes('webFetch'));
+  assert.ok(toolValues.includes('codeExecution'));
+
+  assert.ok(nested.webFetchMaxUses);
+  assert.equal(nested.webFetchMaxUses.type, 'number');
+  assert.equal(nested.webFetchMaxUses.default, 5);
+});
+
+test('AnthropicChatModel injects web_fetch_20250910 and code_execution_20250825 in invocationParams', () => {
+  const model = new AnthropicChatModel(
+    {
+      apiKey: 'sk-ant-test-dummy',
+      model: 'claude-3-7-sonnet-20250219',
+    },
+    {
+      enableWebFetch: true,
+      webFetchMaxUses: 8,
+      enableCodeExecution: true,
+    },
+  );
+
+  const params = model.invocationParams({});
+  assert.ok(Array.isArray(params.tools));
+
+  const fetchTool = params.tools.find(
+    (t) => t.type === 'web_fetch_20250910' || t.name === 'web_fetch',
+  );
+  assert.ok(fetchTool, 'Web fetch tool should be present');
+  assert.equal(fetchTool.max_uses, 8);
+
+  const codeTool = params.tools.find(
+    (t) => t.type === 'code_execution_20250825' || t.name === 'code_execution',
+  );
+  assert.ok(codeTool, 'Code execution tool should be present');
+});
+
+test('Anthropic supplyData maps serverSideTools to serverToolsOptions for webFetch and codeExecution', async () => {
+  const parameters = {
+    provider: 'anthropic',
+    anthropicModel: 'claude-sonnet-5-5',
+    anthropicOptions: {
+      serverSideTools: ['webFetch', 'codeExecution'],
+      webFetchMaxUses: 6,
+    },
+  };
+
+  const context = {
+    getNodeParameter(name, _idx, fallback) {
+      return parameters[name] ?? fallback;
+    },
+    async getCredentials() {
+      return {
+        apiKey: 'sk-ant-test-credential',
+      };
+    },
+    getNode() {
+      return { name: 'Universal Chat Model', parameters };
+    },
+    addInputData() {
+      return { index: 0 };
+    },
+    addOutputData() {},
+    getNextRunIndex() {
+      return 0;
+    },
+    logAiEvent() {},
+  };
+
+  const supplied = await new UniversalChatModel().supplyData.call(context, 0);
+  assert.ok(supplied.response);
+  const model = supplied.response;
+  assert.ok(model instanceof AnthropicChatModel);
+  assert.equal(model.serverToolsOptions?.enableWebFetch, true);
+  assert.equal(model.serverToolsOptions?.webFetchMaxUses, 6);
+  assert.equal(model.serverToolsOptions?.enableCodeExecution, true);
 });
 
 
