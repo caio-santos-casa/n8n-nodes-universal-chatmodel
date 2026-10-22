@@ -1296,14 +1296,6 @@ export class UniversalChatModel implements INodeType {
             default: [],
             description: 'Native tools executed directly on Google servers during model generation',
           },
-          {
-            displayName: 'Enable Google Search Grounding',
-            name: 'enableGoogleSearch',
-            type: 'boolean',
-            default: false,
-            description:
-              'Allow Gemini to perform real-time Google searches to ground its responses with up-to-date web information and citations.',
-          },
           ...sharedModelOptions(),
         ],
       },
@@ -1461,14 +1453,6 @@ export class UniversalChatModel implements INodeType {
             },
             description:
               'Maximum number of web pages or documents Claude can fetch per request (1 to 20).',
-          },
-          {
-            displayName: 'Enable Web Search',
-            name: 'enableWebSearch',
-            type: 'boolean',
-            default: false,
-            description:
-              'Enable native Anthropic Web Search tool to allow Claude to autonomously search the web and ground answers with source citations.',
           },
           ...sharedModelOptions(),
         ],

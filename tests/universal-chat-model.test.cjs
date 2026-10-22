@@ -140,7 +140,6 @@ test('Gemini generation controls are optional collection entries', () => {
       'serviceTier',
       'safetySettings',
       'serverSideTools',
-      'enableGoogleSearch',
       'systemMessage',
       'includeTokenUsageInAgentOutput',
       'includeIntermediateStepsInOutput',
@@ -5973,19 +5972,41 @@ test('Anthropic model call retries on HTTP 529 (Overloaded Error) and normalizes
   }
 });
 
-test('Gemini options include enableGoogleSearch grounding property', () => {
-  const description = new UniversalChatModel().description;
-  const geminiOptions = description.properties.find(
-    (property) => property.name === 'geminiOptions',
-  );
-  assert.ok(geminiOptions);
-  const nested = Object.fromEntries(
-    geminiOptions.options.map((option) => [option.name, option]),
-  );
+test('Gemini supplyData supports legacy enableGoogleSearch property', async () => {
+  const parameters = {
+    provider: 'gemini',
+    geminiModel: 'gemini-2.5-flash',
+    geminiOptions: {
+      enableGoogleSearch: true,
+    },
+  };
 
-  assert.ok(nested.enableGoogleSearch);
-  assert.equal(nested.enableGoogleSearch.type, 'boolean');
-  assert.equal(nested.enableGoogleSearch.default, false);
+  const context = {
+    getNodeParameter(name, _idx, fallback) {
+      return parameters[name] ?? fallback;
+    },
+    async getCredentials() {
+      return {
+        apiKey: 'fake-gemini-key',
+      };
+    },
+    getNode() {
+      return { name: 'Universal Chat Model', parameters };
+    },
+    addInputData() {
+      return { index: 0 };
+    },
+    addOutputData() {},
+    getNextRunIndex() {
+      return 0;
+    },
+    logAiEvent() {},
+  };
+
+  const supplied = await new UniversalChatModel().supplyData.call(context, 0);
+  assert.ok(supplied.response);
+  const model = supplied.response;
+  assert.equal(model.enableGoogleSearch, true);
 });
 
 test('GeminiChatModel with enableGoogleSearch adds googleSearch tool to client and bindTools', () => {
@@ -6004,7 +6025,7 @@ test('GeminiChatModel with enableGoogleSearch adds googleSearch tool to client a
   assert.ok(bound);
 });
 
-test('Anthropic options include enableWebSearch, webSearchMaxUses and webSearchAllowedDomains', () => {
+test('Anthropic options include serverSideTools with webSearch, webSearchMaxUses and webSearchAllowedDomains', () => {
   const description = new UniversalChatModel().description;
   const anthropicOptions = description.properties.find(
     (property) => property.name === 'anthropicOptions',
@@ -6014,9 +6035,9 @@ test('Anthropic options include enableWebSearch, webSearchMaxUses and webSearchA
     anthropicOptions.options.map((option) => [option.name, option]),
   );
 
-  assert.ok(nested.enableWebSearch);
-  assert.equal(nested.enableWebSearch.type, 'boolean');
-  assert.equal(nested.enableWebSearch.default, false);
+  assert.ok(nested.serverSideTools);
+  const toolValues = nested.serverSideTools.options.map((opt) => opt.value);
+  assert.ok(toolValues.includes('webSearch'));
 
   assert.ok(nested.webSearchMaxUses);
   assert.equal(nested.webSearchMaxUses.type, 'number');
