@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.39 - 2026-10-22
+
+- Adiciona suporte nativo a **Server-Side Tools** no provedor Anthropic Claude:
+  - **Web Search** (`web_search_20250305`) com limites configuráveis de uso e domínios permitidos/bloqueados.
+  - **Web Fetch** (`web_fetch_20250910`) com limite configurável de requisições.
+  - **Code Execution** (`code_execution_20250825`) para execução de código Python em sandbox.
+- Adiciona seletor unificado de **Server-Side Tools** no Google Gemini:
+  - **Google Search** (grounding nativo do Gemini).
+  - **Code Execution** (execução de código Python).
+- Corrige incompatibilidade do Gemini com Function Calling e ferramentas built-in:
+  - Injeta automaticamente `toolConfig.includeServerSideToolInvocations: true` ao combinar ferramentas nativas com ferramentas de AI Agent.
+- Captura e expõe metadados de busca e código no output do AI Agent:
+  - `grounding`: queries de busca e fontes com títulos e URLs.
+  - `codeExecutions`: código executado e resultados.
+  - Opção **Include Server-Side Tool Details in Output** para controle de visibilidade.
+- Corrige vazamento da palavra literal `"undefined"` no texto durante streaming com citações da Anthropic.
+- Reutiliza a credencial nativa `anthropicApi` do n8n para prevenir conflito de registro e falha na instalação.
+
 ## 1.0.37 - 2026-09-28
 
 - Adiciona a opção Gemini **Include Gemini Request Details in Output** para
