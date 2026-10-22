@@ -6506,6 +6506,154 @@ test('AI Agent output omits grounding and codeExecutions when includeServerToolD
   assert.equal(output.codeExecutions, undefined);
 });
 
+test('sanitizeUndefinedTextLeakage removes leaked undefined tokens from citations', () => {
+  const { sanitizeUndefinedTextLeakage } = require('../dist/nodes/UniversalChatModel/AgentOutputBridge.js');
+
+  const input =
+    '- **Jornal Cidade**: undefinedMunicípio registra mínima de 14,4°C.\n' +
+    '- **Previsão Agora**: undefinedmedição às 18:45 de 18°.\n' +
+    '- **HG Brasil**: undefinedatualizado em 14 de outubro.\n' +
+    'undefinedTexto no início.\n' +
+    'Texto com undefined como palavra solta no meio.\n' +
+    'if (variavel === undefined) return;';
+
+  const output = sanitizeUndefinedTextLeakage(input);
+
+  assert.equal(
+    output,
+    '- **Jornal Cidade**: Município registra mínima de 14,4°C.\n' +
+      '- **Previsão Agora**: medição às 18:45 de 18°.\n' +
+      '- **HG Brasil**: atualizado em 14 de outubro.\n' +
+      'Texto no início.\n' +
+      'Texto com undefined como palavra solta no meio.\n' +
+      'if (variavel === undefined) return;',
+  );
+});
+
+test('augmentAnthropicMessage parses JSON string inputs and web_search_tool_result', () => {
+  const fakeMessage = {
+    content: [
+      {
+        type: 'server_tool_use',
+        name: 'web_search',
+        input: '{"query": "temperatura rio claro"}',
+      },
+      {
+        type: 'web_search_tool_result',
+        content: [
+          { url: 'https://jornalcidade.net', title: 'Jornal Cidade' },
+          { uri: 'https://previsaoagora.com.br', title: 'Previsao Agora' },
+        ],
+      },
+      {
+        type: 'text',
+        text: 'Previsão encontrada:',
+        citations: [
+          {
+            type: 'web_search_result_location',
+            url: 'https://hgbrasil.com',
+            title: 'HG Brasil',
+          },
+        ],
+      },
+      {
+        type: 'server_tool_use',
+        name: 'code_execution',
+        input: '{"code": "print(20.2)"}',
+      },
+    ],
+    response_metadata: {},
+  };
+
+  augmentAnthropicMessage(fakeMessage);
+
+  assert.ok(fakeMessage.response_metadata.grounding);
+  assert.deepEqual(fakeMessage.response_metadata.grounding.queries, ['temperatura rio claro']);
+  assert.equal(fakeMessage.response_metadata.grounding.sources.length, 3);
+  const urls = fakeMessage.response_metadata.grounding.sources.map((s) => s.url);
+  assert.ok(urls.includes('https://hgbrasil.com'));
+  assert.ok(urls.includes('https://jornalcidade.net'));
+  assert.ok(urls.includes('https://previsaoagora.com.br'));
+
+  assert.ok(fakeMessage.response_metadata.codeExecutions);
+  assert.equal(fakeMessage.response_metadata.codeExecutions[0].code, 'print(20.2)');
+});
+
+test('AnthropicChatModel _streamResponseChunks sanitizes citation blocks and extracts grounding in streaming', async () => {
+  const model = new AnthropicChatModel(
+    { anthropicApiKey: 'fake-key', model: 'claude-3-5-haiku-20241022' },
+    { enableWebSearch: true, enableCodeExecution: true },
+  );
+
+  // Mock createStreamWithRetry to return SSE events
+  model.createStreamWithRetry = async function* () {
+    yield {
+      type: 'message_start',
+      message: { id: 'msg_1', usage: { input_tokens: 100, output_tokens: 10 } },
+    };
+    yield {
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'server_tool_use', id: 'stu_1', name: 'web_search' },
+    };
+    yield {
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'input_json_delta', partial_json: '{"query": "tempo hoje"}' },
+    };
+    yield {
+      type: 'content_block_start',
+      index: 1,
+      content_block: {
+        type: 'web_search_tool_result',
+        content: [{ url: 'https://tempo.com', title: 'Tempo Hoje' }],
+      },
+    };
+    yield {
+      type: 'content_block_start',
+      index: 2,
+      content_block: { type: 'text', text: 'Hoje faz 25°C' },
+    };
+    yield {
+      type: 'content_block_delta',
+      index: 2,
+      delta: {
+        type: 'citations_delta',
+        citation: { type: 'web_search_result_location', url: 'https://tempo.com', title: 'Tempo Hoje' },
+      },
+    };
+    yield {
+      type: 'message_delta',
+      usage: { output_tokens: 20 },
+      delta: {},
+    };
+  };
+
+  const chunks = [];
+  for await (const chunk of model._streamResponseChunks([new HumanMessage('Tempo?')], {})) {
+    chunks.push(chunk);
+  }
+
+  assert.ok(chunks.length > 0);
+
+  // Check that no text block has undefined text
+  for (const chunk of chunks) {
+    if (Array.isArray(chunk.message?.content)) {
+      for (const block of chunk.message.content) {
+        if (block.type === 'text') {
+          assert.notEqual(block.text, undefined);
+        }
+      }
+    }
+  }
+
+  // Check that the last chunk has grounding
+  const lastChunk = chunks[chunks.length - 1];
+  assert.ok(lastChunk.message.response_metadata.grounding);
+  assert.deepEqual(lastChunk.message.response_metadata.grounding.queries, ['tempo hoje']);
+  assert.equal(lastChunk.message.response_metadata.grounding.sources[0].url, 'https://tempo.com');
+});
+
 
 
 

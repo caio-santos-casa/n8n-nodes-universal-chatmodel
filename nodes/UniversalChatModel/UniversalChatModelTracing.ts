@@ -9,6 +9,7 @@ import {
 } from 'n8n-workflow';
 
 import type { GeminiRequestDetail, GeminiResponseMetadata, GeminiUsageMetadata } from './GeminiChatModel';
+import { augmentAnthropicMessage } from './AnthropicChatModel';
 import { recordAgentModelMetadata } from './AgentOutputBridge';
 import {
   type ModelProvider,
@@ -159,6 +160,7 @@ function findGrounding(output: LLMResult): IDataObject | undefined {
   if (gemini?.grounding) return gemini.grounding as unknown as IDataObject;
 
   for (const message of findMessages(output)) {
+    augmentAnthropicMessage(message);
     const responseMetadata = asRecord(message.response_metadata);
     const grounding = asRecord(responseMetadata?.grounding);
     if (grounding) return grounding as unknown as IDataObject;
@@ -178,6 +180,7 @@ function findCodeExecutions(output: LLMResult): IDataObject[] | undefined {
   }
 
   for (const message of findMessages(output)) {
+    augmentAnthropicMessage(message);
     const responseMetadata = asRecord(message.response_metadata);
     if (
       Array.isArray(responseMetadata?.codeExecutions) &&
@@ -596,6 +599,9 @@ export class UniversalChatModelTracing extends BaseCallbackHandler {
       index: this.executionFunctions.getNextRunIndex(),
       prompts: [],
     };
+    for (const message of findMessages(output)) {
+      augmentAnthropicMessage(message);
+    }
     const gemini = findGeminiMetadata(output);
     const geminiMetadata = compactGeminiMetadata(gemini);
     const geminiRequests = Array.isArray(gemini?.requestDetails)

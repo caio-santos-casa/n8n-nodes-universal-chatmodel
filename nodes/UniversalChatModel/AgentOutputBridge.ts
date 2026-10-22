@@ -64,6 +64,12 @@ function asRecord(value: unknown): Record<string, any> | undefined {
     : undefined;
 }
 
+export function sanitizeUndefinedTextLeakage(text: string): string {
+  return text
+    .replace(/(:\s*)undefined(?=[A-Za-z\u00C0-\u017F0-9])/g, '$1')
+    .replace(/(^|\s)undefined(?=[A-Za-z\u00C0-\u017F0-9])/g, '$1');
+}
+
 /**
  * n8n's Agent can expose LangChain's complete AIMessage under
  * intermediateSteps[].action.messageLog. That message is required while the
@@ -359,6 +365,9 @@ function attachMetadataToAgentResult(
         json,
         calls[calls.length - 1]?.includeIntermediateStepsInOutput === true,
       );
+      if (typeof json.output === 'string') {
+        json.output = sanitizeUndefinedTextLeakage(json.output);
+      }
     }
 
     // Prefer the final value produced by the Agent/output parser. The captured
