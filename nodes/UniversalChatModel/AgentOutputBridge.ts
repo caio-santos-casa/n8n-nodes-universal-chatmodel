@@ -28,20 +28,20 @@ interface AgentCaptureStore {
 }
 
 const agentCaptureKey = Symbol.for(
-  'n8n-nodes-universal-chatmodel.agent-capture-store',
+  'n8n-nodes-universal-chatmodel-beta.agent-capture-store',
 );
 const agentCapture: AsyncLocalStorage<AgentCaptureStore> =
   (globalThis as any)[agentCaptureKey] ??
   ((globalThis as any)[agentCaptureKey] =
     new AsyncLocalStorage<AgentCaptureStore>());
 const patchedAgentSymbol = Symbol.for(
-  'n8n-nodes-universal-chatmodel.agent-output-bridge',
+  'n8n-nodes-universal-chatmodel-beta.agent-output-bridge',
 );
 const patchedExecutorSymbol = Symbol.for(
-  'n8n-nodes-universal-chatmodel.agent-executor-output-bridge',
+  'n8n-nodes-universal-chatmodel-beta.agent-executor-output-bridge',
 );
 const moduleLoadHookSymbol = Symbol.for(
-  'n8n-nodes-universal-chatmodel.agent-module-load-hook',
+  'n8n-nodes-universal-chatmodel-beta.agent-module-load-hook',
 );
 const agentModulePattern =
   /[\\/]n8n-nodes-langchain[\\/].*[\\/]nodes[\\/]agents[\\/]Agent[\\/]V[123][\\/]AgentV[123]\.node\.(?:js|cjs)$/i;
@@ -489,7 +489,7 @@ function patchLoadedAgentClasses(): number {
 
 let patchChecksScheduled = false;
 const resolveFallbackSymbol = Symbol.for(
-  'n8n-nodes-universal-chatmodel.resolve-fallback-hook',
+  'n8n-nodes-universal-chatmodel-beta.resolve-fallback-hook',
 );
 
 function extractPackageName(request: string): string | undefined {

@@ -1,5 +1,15 @@
 # Changelog
 
+## beta 1.0.0 (`n8n-nodes-universal-chatmodel-beta`) - 2026-10-23
+
+- Publica canal de testes independente para validação em produção sem colisão com nós instalados:
+  - Adiciona versionamento formal do nó: `version: [1, 2]`, com `defaultVersion: 2` para manter fluxos existentes estáveis na v1 enquanto novos nós utilizam a v2.
+  - **Google Gemini (Nativo):** Na v2, conecta via credencial nativa do n8n `googlePalmApi` ("Google Gemini(PaLM) Api"). Mantém fallback automático para nós legados v1.
+  - **OpenAI Compatible:** Mantém a credencial própria com os mesmos campos (`baseUrl` e `apiKey`), utilizando o ID interno `openAiCompatibleApiBeta` para coexistir pacificamente com o pacote principal sem conflito de registro.
+  - **Anthropic Claude (Nativo):** Conecta via credencial nativa `anthropicApi`.
+  - Isola identificadores de telemetria do AI Agent com namespace `-beta`.
+  - Contém todas as blindagens de Lazy Loading e recuperação de cache de módulos da versão 1.0.41.
+
 ## 1.0.41 - 2026-10-23
 
 - Corrige falha de carregamento e atualização do pacote no n8n (`The specified package could not be loaded` / `Cannot find module '.../@langchain/core/node_modules/zod/v4/core/index.cjs'`) em ambientes de produção:

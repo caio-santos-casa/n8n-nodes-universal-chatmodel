@@ -10,7 +10,7 @@ const expectedFiles = [
   packageJson.main,
   packageJson.types,
   ...packageJson.n8n.nodes,
-  ...packageJson.n8n.credentials,
+  ...(packageJson.n8n.credentials ?? []),
   'dist/nodes/UniversalChatModel/UniversalChatModel.node.json',
   'dist/nodes/UniversalChatModel/universalChatModel.svg',
 ];

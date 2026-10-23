@@ -1,7 +1,7 @@
 import { ICredentialType, INodeProperties } from 'n8n-workflow';
 
-export class OpenAiCompatibleApi implements ICredentialType {
-  name = 'openAiCompatibleApi';
+export class OpenAiCompatibleApiBeta implements ICredentialType {
+  name = 'openAiCompatibleApiBeta';
   displayName = 'OpenAI Compatible / Local LLM API';
   documentationUrl = 'https://docs.n8n.io/';
   properties: INodeProperties[] = [

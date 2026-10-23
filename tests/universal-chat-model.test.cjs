@@ -226,12 +226,14 @@ test('Gemini generation controls are optional collection entries', () => {
     ),
     false,
   );
+  assert.deepEqual(description.version, [1, 2]);
+  assert.equal(description.defaultVersion, 2);
   const credentials = Object.fromEntries(
     description.credentials.map((credential) => [credential.name, credential]),
   );
-  assert.equal(credentials.googleGeminiApi.required, true);
+  assert.equal(credentials.googlePalmApi.required, true);
   assert.equal(credentials.anthropicApi.required, true);
-  assert.equal(credentials.openAiCompatibleApi.required, false);
+  assert.equal(credentials.openAiCompatibleApiBeta.required, false);
 });
 
 test('Usage Reporter is an optional AI Tool input with configurable privacy controls', () => {

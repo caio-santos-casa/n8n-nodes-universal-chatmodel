@@ -935,7 +935,8 @@ export class UniversalChatModel implements INodeType {
     name: 'universalChatModel',
     icon: 'file:universalChatModel.svg',
     group: ['transform'],
-    version: 1,
+    version: [1, 2],
+    defaultVersion: 2,
     description: 'Universal AI Chat Model supporting Google Gemini (Native), Anthropic Claude, and OpenAI Compatible / Local LLMs (Ollama, LM Studio, DeepSeek, OpenRouter, vLLM)',
     defaults: {
       name: 'Universal Chat Model',
@@ -945,7 +946,7 @@ export class UniversalChatModel implements INodeType {
     outputs: [NodeConnectionTypes.AiLanguageModel],
     credentials: [
       {
-        name: 'googleGeminiApi',
+        name: 'googlePalmApi',
         required: true,
         displayOptions: {
           show: {
@@ -963,7 +964,7 @@ export class UniversalChatModel implements INodeType {
         },
       },
       {
-        name: 'openAiCompatibleApi',
+        name: 'openAiCompatibleApiBeta',
         required: false,
         displayOptions: {
           show: {
@@ -1589,7 +1590,10 @@ export class UniversalChatModel implements INodeType {
       async getGeminiModels(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
         let apiKey = '';
         try {
-          const creds = await this.getCredentials('googleGeminiApi');
+          let creds = await this.getCredentials('googlePalmApi').catch(() => undefined);
+          if (!creds || !creds.apiKey) {
+            creds = await this.getCredentials('googleGeminiApi').catch(() => undefined);
+          }
           if (creds && typeof creds.apiKey === 'string') apiKey = creds.apiKey;
         } catch { /* ignore */ }
 
@@ -1682,7 +1686,10 @@ export class UniversalChatModel implements INodeType {
         let apiKey = 'not-needed';
 
         try {
-          const creds = await this.getCredentials('openAiCompatibleApi');
+          let creds = await this.getCredentials('openAiCompatibleApiBeta').catch(() => undefined);
+          if (!creds) {
+            creds = await this.getCredentials('openAiCompatibleApi').catch(() => undefined);
+          }
           if (creds && typeof creds.baseUrl === 'string' && creds.baseUrl.trim()) baseUrl = creds.baseUrl.trim();
           if (creds && typeof creds.apiKey === 'string' && creds.apiKey.trim()) apiKey = creds.apiKey.trim();
         } catch { /* ignore */ }
@@ -1738,11 +1745,14 @@ export class UniversalChatModel implements INodeType {
 
     if (provider === 'gemini') {
       // ─── Resolve API Key ───
-      const creds = await this.getCredentials('googleGeminiApi');
+      let creds = await this.getCredentials('googlePalmApi').catch(() => undefined);
+      if (!creds || !creds.apiKey) {
+        creds = await this.getCredentials('googleGeminiApi').catch(() => undefined);
+      }
       const geminiApiKey =
         creds && typeof creds.apiKey === 'string' ? creds.apiKey.trim() : '';
       if (!geminiApiKey) {
-        throw new Error('Google Gemini API Key is required. Configure the Google Gemini API credential.');
+        throw new Error('Google Gemini API Key is required. Configure the Google Gemini (PaLM) credential.');
       }
 
       // ─── Resolve Model ───
@@ -2068,7 +2078,10 @@ export class UniversalChatModel implements INodeType {
       let openaiApiKey = 'not-needed';
 
       try {
-        const creds = await this.getCredentials('openAiCompatibleApi');
+        let creds = await this.getCredentials('openAiCompatibleApiBeta').catch(() => undefined);
+        if (!creds) {
+          creds = await this.getCredentials('openAiCompatibleApi').catch(() => undefined);
+        }
         if (creds && typeof creds.baseUrl === 'string' && creds.baseUrl.trim()) baseUrl = creds.baseUrl.trim();
         if (creds && typeof creds.apiKey === 'string' && creds.apiKey.trim()) openaiApiKey = creds.apiKey.trim();
       } catch { /* ignore */ }
