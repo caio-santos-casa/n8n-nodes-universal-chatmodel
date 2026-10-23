@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.40 - 2026-10-23
+## 1.0.41 - 2026-10-23
 
 - Corrige falha de carregamento e atualização do pacote no n8n (`The specified package could not be loaded` / `Cannot find module '.../@langchain/core/node_modules/zod/v4/core/index.cjs'`) em ambientes de produção:
   - Implementa Lazy Loading completo de `@langchain/core`, `UniversalChatModelTracing` e dos adaptadores de modelo (`GeminiChatModel`, `AnthropicChatModel`, `ChatOpenAI`), eliminando qualquer importação de `@langchain/*` ou `zod` no top-level durante a validação de instalação/atualização do pacote pelo n8n.

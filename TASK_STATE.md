@@ -14,6 +14,9 @@ Resolver o erro de carregamento e atualização do pacote no n8n de produção (
 - [x] 3. Atualizar `nodes/UniversalChatModel/UniversalChatModelTracing.ts` para importar de `AnthropicMessageAugmenter`.
 - [x] 4. Implementar Lazy Loading completo em `nodes/UniversalChatModel/UniversalChatModel.node.ts` (zero imports de `@langchain/*` no top-level durante a validação de instalação/atualização do n8n).
 - [x] 5. Implementar `installStalePackageCacheFallback` (`Module._resolveFilename`) e `ensureNestedNodeModulesFallbacks` (symlinks) em `nodes/UniversalChatModel/AgentOutputBridge.ts` para contornar o cache de `package.json` do Node.js após hot-updates do `npm`.
-- [x] 6. Fixar `@anthropic-ai/sdk: ^0.115.0` e incrementar versão para `1.0.40` em `package.json`.
+- [x] 6. Fixar `@anthropic-ai/sdk: ^0.115.0` e incrementar versão para `1.0.41` em `package.json`.
 - [x] 7. Adicionar teste reproduzindo o bug do `packageJsonCache` do Node.js durante hot-update em `tests/universal-chat-model.test.cjs` e atualizar `CHANGELOG.md`.
 - [x] 8. Validar suíte completa (`npm test`: 108/108 testes passando).
+
+## Estado Atual
+Pronto para publicação da versão `1.0.41`.
